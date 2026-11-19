@@ -1,4 +1,4 @@
-/**
+  /**
    * Find user by Username or Shop ID
    */
   async getUserByUsernameOrPhone(identifier) {
@@ -6,15 +6,14 @@
     try {
       const cleaned = identifier.trim();
 
-      // በ username ወይም በ shop_id መፈለግ
       const { data, error } = await this.client
         .from('users')
         .select('*')
-        .or(username.ilike.${cleaned},shop_id.ilike.${cleaned})
+        .or(`username.ilike.${cleaned},shop_id.ilike.${cleaned}`)
         .maybeSingle();
 
       if (error) {
-        logger.error(Error finding user by identifier ${identifier}:, error.message);
+        logger.error(`Error finding user by identifier ${identifier}:`, error.message);
         return null;
       }
       return data;
