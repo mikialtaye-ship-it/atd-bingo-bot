@@ -26,7 +26,6 @@ const createWebhookRouter = (bot) => {
     }
 
     // 2. Extract SMS payload
-    // Handle multiple standard SMS forwarder JSON formats
     const payload = req.body || {};
     const rawSms =
       payload.body ||
@@ -36,9 +35,9 @@ const createWebhookRouter = (bot) => {
       payload.msg ||
       (typeof payload === 'string' ? payload : '');
 
-    const sender = payload.from || payload.sender || 'UNKNOWN';
+    const sender = payload.from  payload.sender  'UNKNOWN';
 
-    logger.info(`Received SMS from forwarder [${sender}]: ${rawSms.substring(0, 80)}...`);
+    logger.info(Received SMS from forwarder [${sender}]: ${rawSms.substring(0, 80)}...);
 
     if (!rawSms) {
       return res.status(400).json({ error: 'Missing SMS body or text in request payload' });
@@ -48,7 +47,7 @@ const createWebhookRouter = (bot) => {
     const parsed = smsParser.parse(rawSms);
 
     if (!parsed.success) {
-      logger.info(`SMS not recognized as financial transaction: ${parsed.error}`);
+      logger.info(SMS not recognized as financial transaction: ${parsed.error});
       return res.status(200).json({
         success: false,
         message: 'SMS received but no valid transaction ID or amount was detected',
@@ -57,7 +56,7 @@ const createWebhookRouter = (bot) => {
     }
 
     const { transactionId, amount, provider } = parsed;
-    logger.info(`Parsed Forwarder SMS -> Provider: ${provider}, Txn: ${transactionId}, Amount: ${amount} ETB`);
+    logger.info(Parsed Forwarder SMS -> Provider: ${provider}, Txn: ${transactionId}, Amount: ${amount} ETB);
 
     try {
       // 4. Check if there is a pending user transaction waiting for this transactionId
@@ -65,7 +64,7 @@ const createWebhookRouter = (bot) => {
 
       if (existingTx && existingTx.status === 'pending') {
         // MATCH FOUND! Auto-approve deposit immediately
-        logger.info(`Auto-approving pending transaction for user ${existingTx.username} (Txn: ${transactionId})`);
+        logger.info(Auto-approving pending transaction for user ${existingTx.username} (Txn: ${transactionId}));
 
         const approvalResult = await supabaseService.approveDepositRPC(
           transactionId,
@@ -86,11 +85,11 @@ const createWebhookRouter = (bot) => {
           // Notify User on Telegram immediately
           if (telegram_id && bot) {
             const userMsg =
-              `🎉 <b>ክፍያዎ በራስ-ሰር ተረጋግጧል! (Auto-Approved)</b>\n\n` +
-              `✅ <b>${Number(amount).toFixed(2)} ብር</b> ወደ ATD Bingo አካውንትዎ ገብቷል።\n` +
-              `💳 <b>አዲሱ ባላንስዎ:</b> <code>${Number(new_balance).toFixed(2)} ብር</code>\n` +
-              `🔖 <b>የግብይት ቁጥር:</b> <code>${transactionId}</code>\n\n` +
-              `መልካም የጨዋታ ጊዜ ይሁንልዎት! 🎱🇪🇹`;
+              🎉 <b>ክፍያዎ በራስ-ሰር ተረጋግጧል! (Auto-Approved)</b>\n\n +
+              ✅ <b>${Number(amount).toFixed(2)} ብር</b> ወደ ATD Bingo አካውንትዎ ገብቷል።\n +
+              💳 <b>አዲሱ ባላንስዎ:</b> <code>${Number(new_balance).toFixed(2)} ብር</code>\n +
+              🔖 <b>የግብይት ቁጥር:</b> <code>${transactionId}</code>\n\n +
+              መልካም የጨዋታ ጊዜ ይሁንልዎት! 🎱🇪🇹;
 
             try {
               await bot.telegram.sendMessage(telegram_id, userMsg, {
@@ -98,18 +97,17 @@ const createWebhookRouter = (bot) => {
                 ...amharicKeyboards.mainMenu(),
               });
             } catch (userNotifyErr) {
-              logger.warn(`Could not notify user on Telegram: ${userNotifyErr.message}`);
+              logger.warn(Could not notify user on Telegram: ${userNotifyErr.message});
             }
           }
-
-          // Notify Admin on Telegram
+ // Notify Admin on Telegram
           if (config.adminTelegramId && bot) {
             const adminAlert =
-              `🤖 <b>Auto-Sync Deposit Approved via SMS Forwarder</b>\n\n` +
-              `👤 <b>ተጠቃሚ:</b> <code>${existingTx.username}</code>\n` +
-              `💰 <b>መጠን:</b> ${Number(amount).toFixed(2)} ብር\n` +
-              `🔖 <b>Txn ID:</b> <code>${transactionId}</code>\n` +
-              `💳 <b>አዲሱ ባላንስ:</b> ${Number(new_balance).toFixed(2)} ብር`;
+              🤖 <b>Auto-Sync Deposit Approved via SMS Forwarder</b>\n\n +
+              👤 <b>ተጠቃሚ:</b> <code>${existingTx.username}</code>\n +
+              💰 <b>መጠን:</b> ${Number(amount).toFixed(2)} ብር\n +
+              🔖 <b>Txn ID:</b> <code>${transactionId}</code>\n +
+              💳 <b>አዲሱ ባላንስ:</b> ${Number(new_balance).toFixed(2)} ብር;
 
             try {
               await bot.telegram.sendMessage(config.adminTelegramId, adminAlert, {
@@ -145,5 +143,19 @@ const createWebhookRouter = (bot) => {
 
   return router;
 };
+
+// =========================================================================
+// Render Free Tier እንዳይተኛ (Anti-Sleep Keep-Alive Pinger)
+// =========================================================================
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https:https://atd-bingo-bot.onrender.com';
+
+setInterval(async () => {
+  try {
+    const response = await fetch(${RENDER_URL}/health);
+    logger.info([Keep-Alive] Pinged ${RENDER_URL}/health - Status: ${response.status});
+  } catch (err) {
+    logger.error([Keep-Alive] Ping failed: ${err.message});
+  }
+}, 5 * 60 * 1000); // በየ 5 ደቂቃው ይቀሰቅሰዋል
 
 module.exports = createWebhookRouter;
