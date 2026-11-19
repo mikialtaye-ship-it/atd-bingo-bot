@@ -1,339 +1,965 @@
-import { Markup, Telegraf, session } from 'telegraf';
-import { config } from './config.js';
-import { parsePaymentMessage } from './payments.js';
-import { isMissingColumn, supabase } from './supabase.js';
+const { Telegraf, Markup } = require('telegraf');
+const config = require('./config');
+const db = require('./supabase');
+const { parsePaymentSms, pushToControlDashboard } = require('./payments');
 
-export const bot = new Telegraf(config.botToken);
-bot.use(session());
+const bot = new Telegraf(config.botToken);
 
-const menu = Markup.keyboard([
-  ['💰 ባላንስ መሙላት (Deposit)'],
-  ['💳 የእኔ ባላንስ (My Balance)', '📜 የግብይት ታሪክ (History)'],
-  ['📞 እርዳታ (Support)'],
-]).resize().persistent();
+// In-memory conversational session state per Telegram user
+const userSessions = new Map();
 
-const paymentChoices = Markup.inlineKeyboard([
-  [Markup.button.callback('ቴሌብር', 'pay:telebirr')],
-  [Markup.button.callback('ንግድ ባንክ (CBE)', 'pay:cbe')],
-  [Markup.button.callback('አቢሲኒያ ባንክ', 'pay:abyssinia')],
-]);
-
-const paymentLabels = {
-  telebirr: 'ቴሌብር',
-  cbe: 'ንግድ ባንክ (CBE)',
-  abyssinia: 'አቢሲኒያ ባንክ',
-};
-
-function mainMenuMessage() {
-  return `እንኳን ወደ ATD Bingo በደህና መጡ!\n\nከታች ያለውን አገልግሎት ይምረጡ።`;
-}
-
-function formatMoney(value) {
-  return `${Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ብር`;
-}
-
-async function getLink(telegramId) {
-  const { data, error } = await supabase
-    .from('telegram_links')
-    .select('user_id')
-    .eq('telegram_id', String(telegramId))
-    .maybeSingle();
-  if (error) throw error;
-  return data;
-}
-
-async function getAccount(userId) {
-  const { data, error } = await supabase.from('users').select('id,balance').eq('id', userId).maybeSingle();
-  if (error) throw error;
-  return data;
-}
-
-async function linkByIdentifier(value) {
-  const identifier = value.trim();
-  if (!identifier || identifier.length > 100) return null;
-  for (const column of config.identifierColumns) {
-    const { data, error } = await supabase.from('users').select('id').eq(column, identifier).maybeSingle();
-    if (!error && data) return data;
-    if (error && !isMissingColumn(error)) throw error;
+function getSession(userId) {
+  if (!userSessions.has(userId)) {
+    userSessions.set(userId, { step: null, data: {} });
   }
-  return null;
+  return userSessions.get(userId);
 }
 
-async function saveLink(telegramId, userId) {
-  const { error } = await supabase.from('telegram_links').upsert({
-    telegram_id: String(telegramId),
-    user_id: userId,
-  }, { onConflict: 'telegram_id' });
-  if (error) throw error;
+function clearSession(userId) {
+  userSessions.set(userId, { step: null, data: {} });
 }
 
-async function requireLink(ctx) {
-  const link = await getLink(ctx.from.id);
-  if (link) return link;
-  ctx.session.awaitingLink = true;
-  await ctx.reply(
-    'የATD Bingo መለያዎን ለማገናኘት በመለያዎ የተመዘገበውን ስልክ ቁጥር ወይም የተጠቃሚ ስም ይጻፉ። ወይም የተመዘገበውን ስልክ ቁጥር በእውቂያ አዝራሩ ያጋሩ።',
-    Markup.keyboard([[Markup.button.contactRequest('📱 ስልኬን አጋራ')], ['/cancel']]).resize(),
-  );
-  return null;
+function isAdmin(userId) {
+  return config.adminIds.includes(Number(userId));
 }
 
-async function submitDeposit(ctx, method, content, photoFileId = null) {
-  const parsed = parsePaymentMessage(content);
-  if (!parsed) {
-    ctx.session.awaitingReceipt = method;
-    if (photoFileId) {
-      await bot.telegram.sendPhoto(config.adminTelegramId, photoFileId, {
-        caption: `የደረሰኝ ፎቶ (የግብይት መረጃ በካፕሽኑ አልተገኘም)\nTelegram ID: ${ctx.from.id}\nTelegram: ${ctx.from.username || ctx.from.first_name || 'ያልታወቀ'}\nየክፍያ ዘዴ: ${paymentLabels[method]}`,
-      });
+async function notifyAdmins(text, extra = {}) {
+  for (const adminId of config.adminIds) {
+    try {
+      await bot.telegram.sendMessage(adminId, text, { parse_mode: 'Markdown', ...extra });
+    } catch (err) {
+      console.error(`Failed to notify admin ${adminId}:`, err.message);
     }
-    await ctx.reply(
-      photoFileId
-        ? 'የደረሰኝ ፎቶዎ ለአስተዳዳሪው ተልኳል። ለማጽደቅ ግን Transaction ID/Reference Number እና የETB መጠኑን አሁን በጽሑፍ ይላኩ።'
-        : 'የክፍያ መረጃውን ማንበብ አልተቻለም። እባክዎ Transaction ID/Reference Number እና የETB መጠኑን ያካተተውን SMS ወይም የደረሰኝ ፎቶ ካፕሽን ይላኩ።',
-      menu,
-    );
-    return;
   }
-
-  const link = await getLink(ctx.from.id);
-  if (!link) {
-    ctx.session.awaitingPaymentMethod = null;
-    await requireLink(ctx);
-    return;
-  }
-
-  const account = await getAccount(link.user_id);
-  if (!account) throw new Error('Linked user account no longer exists');
-  const { data: transaction, error } = await supabase.from('transactions').insert({
-    user_id: account.id,
-    telegram_id: String(ctx.from.id),
-    username: ctx.from.username || ctx.from.first_name || 'Telegram user',
-    amount: parsed.amount,
-    payment_method: method,
-    transaction_id: parsed.transactionId,
-    status: 'pending',
-  }).select('id').single();
-
-  if (error?.code === '23505') {
-    await ctx.reply('❌ ይህ Transaction ID ከዚህ በፊት ተመዝግቧል። እባክዎ የተለየ የክፍያ ማረጋገጫ ይጠቀሙ።', menu);
-    return;
-  }
-  if (error) throw error;
-
-  const adminText = [
-    '🆕 አዲስ የባላንስ መሙያ ጥያቄ',
-    `መጠን: ${formatMoney(parsed.amount)}`,
-    `መንገድ: ${paymentLabels[method]}`,
-    `Transaction ID: ${parsed.transactionId}`,
-    `የATD Bingo User ID: ${account.id}`,
-    `Telegram ID: ${ctx.from.id}`,
-    `Telegram: ${ctx.from.username ? `@${ctx.from.username}` : (ctx.from.first_name || 'ያልታወቀ')}`,
-  ].join('\n');
-  const actions = Markup.inlineKeyboard([[
-    Markup.button.callback('✅ አጽድቅ (Approve)', `dep:a:${transaction.id}`),
-    Markup.button.callback('❌ ውድቅ አድርግ (Reject)', `dep:r:${transaction.id}`),
-  ]]);
-
-  if (photoFileId) {
-    await bot.telegram.sendPhoto(config.adminTelegramId, photoFileId, { caption: adminText, ...actions });
-  } else {
-    await bot.telegram.sendMessage(config.adminTelegramId, adminText, actions);
-  }
-  await ctx.reply('✅ የመሙያ ጥያቄዎ ተቀብሏል። ክፍያው ከተረጋገጠ በኋላ ባላንስዎ ይጨመራል።', menu);
 }
 
-bot.command('start', async (ctx) => {
-  ctx.session = {};
-  const link = await getLink(ctx.from.id);
-  if (!link) {
-    ctx.session.awaitingLink = true;
-    await ctx.reply(
-      `${mainMenuMessage()}\n\nመጀመሪያ የATD Bingo መለያዎን ያገናኙ። የተመዘገበውን ስልክ ቁጥር ወይም የተጠቃሚ ስም ይጻፉ፣ ወይም የተመዘገበውን ስልክ በእውቂያ አዝራሩ ያጋሩ።`,
-      Markup.keyboard([[Markup.button.contactRequest('📱 ስልኬን አጋራ')], ['/cancel']]).resize(),
-    );
-    return;
-  }
-  await ctx.reply(mainMenuMessage(), menu);
-});
+// ============================================================================
+// 100% AMHARIC PERSISTENT MAIN MENU KEYBOARD
+// ============================================================================
+const MAIN_MENU_KEYBOARD = Markup.keyboard([
+  ['🎮 ኦንላይን ጨዋታዎች (Bingo / Keno / Aviator)'],
+  ['💰 ባላንስ መሙላት', '💳 የእኔ ባላንስ'],
+  ['📲 ኦፍላይን አፕ አውርድ', '📝 አዲስ ቤት መመዝገብ'],
+  ['📜 የግብይት ታሪክ', '📞 እርዳታ']
+]).resize();
 
-bot.command('cancel', async (ctx) => {
-  ctx.session = {};
-  await ctx.reply('የአሁኑ ሂደት ተሰርዟል።', menu);
-});
+// ============================================================================
+// /START & SHOP LINKING
+// ============================================================================
+bot.start(async (ctx) => {
+  clearSession(ctx.from.id);
+  const fullName = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
 
-bot.command('pending', async (ctx) => {
-  if (String(ctx.from.id) !== config.adminTelegramId) return ctx.reply('ይህ ትዕዛዝ ለአስተዳዳሪው ብቻ ነው።');
-  const { data, error } = await supabase.from('transactions')
-    .select('id,amount,payment_method,transaction_id,telegram_id,username,created_at')
-    .eq('status', 'pending').order('created_at', { ascending: true }).limit(20);
-  if (error) throw error;
-  if (!data.length) return ctx.reply('በመጠባበቅ ላይ ያሉ ጥያቄዎች የሉም።');
-  for (const item of data) {
-    await ctx.reply([
-      `ጥያቄ: ${item.id}`,
-      `መጠን: ${formatMoney(item.amount)}`,
-      `ዘዴ: ${paymentLabels[item.payment_method] || item.payment_method}`,
-      `Transaction ID: ${item.transaction_id}`,
-      `ተጠቃሚ: ${item.username} (${item.telegram_id})`,
-    ].join('\n'), Markup.inlineKeyboard([[
-      Markup.button.callback('✅ አጽድቅ', `dep:a:${item.id}`),
-      Markup.button.callback('❌ ውድቅ', `dep:r:${item.id}`),
-    ]]));
-  }
-});
-
-bot.command('setref', async (ctx) => {
-  if (String(ctx.from.id) !== config.adminTelegramId) return ctx.reply('ይህ ትዕዛዝ ለአስተዳዳሪው ብቻ ነው።');
-  const [, id, reference] = ctx.message.text.split(/\s+/);
-  if (!id || !reference || !/^[A-Za-z0-9][A-Za-z0-9-]{4,}$/.test(reference)) {
-    return ctx.reply('አጠቃቀም: /setref <ጥያቄ-ID> <Transaction-ID>');
-  }
-  const { error } = await supabase.from('transactions').update({ transaction_id: reference.toUpperCase() })
-    .eq('id', id).eq('status', 'pending');
-  if (error?.code === '23505') return ctx.reply('ይህ Transaction ID ከዚህ በፊት ተጠቅሟል።');
-  if (error) throw error;
-  await ctx.reply('Transaction ID ተመዝግቧል። አሁን ጥያቄውን ማጽደቅ ይችላሉ።');
-});
-
-bot.action(/^pay:(telebirr|cbe|abyssinia)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const linked = await requireLink(ctx);
-  if (!linked) return;
-  const method = ctx.match[1];
-  ctx.session.awaitingPaymentMethod = null;
-  ctx.session.awaitingReceipt = method;
-  const details = {
-    telebirr: `ቴሌብር: ${config.telebirrNumber}`,
-    cbe: `CBE ሂሳብ: ${config.cbeAccount}`,
-    abyssinia: `አቢሲኒያ ባንክ ሂሳብ: ${config.abyssiniaAccount}`,
-  };
-  await ctx.reply(
-    `${details[method]}\n\nከላይ ያለውን መረጃ ተጠቅመው ክፍያ ይፈጽሙ። ከዚያ የማረጋገጫ SMS ጽሑፉን ወይም የደረሰኝ ፎቶውን ከTransaction ID/Reference Number እና ከETB መጠኑ ጋር በአንድ መልዕክት ይላኩ።`,
-    menu,
-  );
-});
-
-bot.action(/^dep:([ar]):([0-9a-f-]{36})$/i, async (ctx) => {
-  if (String(ctx.from.id) !== config.adminTelegramId) {
-    await ctx.answerCbQuery('ይህ እርምጃ ለአስተዳዳሪው ብቻ ነው።', { show_alert: true });
-    return;
-  }
-  const [, action, id] = ctx.match;
-  const { data: transaction, error: findError } = await supabase.from('transactions')
-    .select('id,user_id,telegram_id,amount,transaction_id,status')
-    .eq('id', id).maybeSingle();
-  if (findError) throw findError;
-  if (!transaction || transaction.status !== 'pending') {
-    await ctx.answerCbQuery('ይህ ጥያቄ ቀድሞ ተሰርቷል ወይም አልተገኘም።', { show_alert: true });
-    return;
+  try {
+    await db.ensureOnlineWallet(ctx.from.id, ctx.from.username, fullName);
+  } catch (err) {
+    console.error('Error initializing online wallet:', err.message);
   }
 
-  if (action === 'r') {
-    const { data: rejected, error } = await supabase.from('transactions').update({ status: 'rejected' })
-      .eq('id', id).eq('status', 'pending').select('id').maybeSingle();
-    if (error) throw error;
-    if (!rejected) {
-      await ctx.answerCbQuery('ይህ ጥያቄ ቀድሞ ተሰርቷል።', { show_alert: true });
-      return;
-    }
-    await bot.telegram.sendMessage(transaction.telegram_id, '❌ የክፍያ ጥያቄዎ አልጸደቀም። እባክዎ ከእርዳታ አገልግሎት ጋር ይገናኙ።');
-    await ctx.editMessageReplyMarkup(undefined);
-    await ctx.answerCbQuery('ጥያቄው ውድቅ ሆኗል።');
-    return;
+  const link = await db.getTelegramLink(ctx.from.id);
+
+  let statusLine =
+    `🔗 *የኦፍላይን ቤት ሁኔታ፦* ገና አልተገናኘም።\n` +
+    `ነባር የATD Bingo ቤት ካለዎት ስልክ ቁጥርዎን ያጋሩ ወይም \`SHOP-XXXXXXX\` / \`Username\` ይላኩ፤ አዲስ ከሆኑ *📝 አዲስ ቤት መመዝገብ* ይጫኑ።`;
+
+  if (link) {
+    statusLine = `✅ *የተገናኘ ኦፍላይን ቤት፦* \`${link.shop_id}\` (Username: \`${link.shop_username}\`)`;
   }
 
-  const { data: newBalance, error } = await supabase.rpc('approve_deposit_and_sync_balance', {
-    p_transaction_id: transaction.transaction_id,
+  const welcomeMsg =
+    `🎉 *እንኳን ወደ ATD Bingo በደህና መጡ!*\n\n` +
+    `በዚህ ቦት ሁለት የተለያዩ አገልግሎቶችን በአንድ ላይ ያገኛሉ፦\n` +
+    `1️⃣ *🏪 ኦፍላይን ቤት (Offline Shop Sync & App):* ለቢንጎ/ኬኖ ቤት ባለቤቶች ባላንስ መሙያ እና የPC/ሞባይል ኦፍላይን አፕ ማውረጃ።\n` +
+    `2️⃣ *🎮 ኦንላይን ጨዋታዎች (Online Gaming Hub):* ቢንጎ (Bingo)፣ ኬኖ (Keno) እና አቪዬተር (Aviator) በቀጥታ በቴሌግራም መጫወቻ።\n\n` +
+    `${statusLine}`;
+
+  await ctx.reply(welcomeMsg, {
+    parse_mode: 'Markdown',
+    ...MAIN_MENU_KEYBOARD
   });
-  if (error) {
-    await ctx.answerCbQuery('ማጽደቅ አልተሳካም፤ ጥያቄው በመጠባበቅ ላይ ይቆያል።', { show_alert: true });
-    throw error;
+
+  if (!link) {
+    await ctx.reply(
+      '📱 ነባር ኦፍላይን ቤትዎን በፍጥነት ለማገናኘት ከታች ያለውን ቁልፍ ተጭነው ስልክ ቁጥርዎን ያጋሩ፦',
+      Markup.keyboard([
+        [Markup.button.contactRequest('📱 ስልክ ቁጥሬን በማጋራት አገናኝ')],
+        ['🏠 ወደ ዋና ማውጫ ተመለስ']
+      ]).resize()
+    );
   }
-  await bot.telegram.sendMessage(
-    transaction.telegram_id,
-    `✅ ክፍያዎ ተረጋግጧል! ${formatMoney(transaction.amount)} ወደ ATD Bingo አካውንትዎ ገብቷል።\nአዲሱ ባላንስዎ፡ ${formatMoney(newBalance)}`,
-  );
-  await ctx.editMessageReplyMarkup(undefined);
-  await ctx.answerCbQuery('ክፍያው ጸድቋል።');
 });
 
+bot.hears('🏠 ወደ ዋና ማውጫ ተመለስ', async (ctx) => {
+  clearSession(ctx.from.id);
+  await ctx.reply('🏠 ወደ ዋናው ማውጫ ተመልሰዋል።', MAIN_MENU_KEYBOARD);
+});
+
+// Handle shared contact for auto-linking existing shop
 bot.on('contact', async (ctx) => {
-  if (ctx.message.contact.user_id !== ctx.from.id) {
-    return ctx.reply('እባክዎ የራስዎን ስልክ ቁጥር በእውቂያ አዝራሩ ያጋሩ።');
+  const phone = ctx.message.contact.phone_number;
+  const shop = await db.findShopByQuery(phone);
+
+  if (!shop) {
+    return ctx.reply(
+      `❌ በዚህ ስልክ ቁጥር (${phone}) የተመዘገበ ACTIVE ቤት አልተገኘም።\n` +
+        `እባክዎ \`SHOP-XXXXXXX\` ወይም \`Username\` ይጻፉ፣ ወይም *📝 አዲስ ቤት መመዝገብ* የሚለውን ይጫኑ።`,
+      MAIN_MENU_KEYBOARD
+    );
   }
-  const link = await linkByIdentifier(ctx.message.contact.phone_number);
-  if (!link) return ctx.reply('ይህ ስልክ ቁጥር በATD Bingo መለያ ላይ አልተመዘገበም። እባክዎ የተመዘገበውን ቁጥር ይጠቀሙ።');
-  await saveLink(ctx.from.id, link.id);
-  ctx.session = {};
-  await ctx.reply(mainMenuMessage(), menu);
+
+  await db.saveTelegramLink({
+    telegramId: ctx.from.id,
+    telegramUsername: ctx.from.username,
+    phone,
+    shopId: shop.shop_id,
+    shopUsername: shop.username
+  });
+
+  await ctx.reply(
+    `✅ *ቤትዎ በተሳካ ሁኔታ ተገናኝቷል!*\n\n` +
+      `🏪 *Shop ID:* \`${shop.shop_id}\`\n` +
+      `👤 *Username:* \`${shop.username}\`\n\n` +
+      `አሁን *💰 ባላንስ መሙላት* በመጫን ባላንስ ማስገባት ይችላሉ።`,
+    { parse_mode: 'Markdown', ...MAIN_MENU_KEYBOARD }
+  );
+});
+
+// ============================================================================
+// MODE B: ONLINE GAMING HUB (BINGO / KENO / AVIATOR)
+// ============================================================================
+bot.hears('🎮 ኦንላይን ጨዋታዎች (Bingo / Keno / Aviator)', async (ctx) => {
+  clearSession(ctx.from.id);
+  const userId = ctx.from.id;
+  const wallet = await db.ensureOnlineWallet(userId, ctx.from.username);
+
+  const buttons = [];
+
+  // 1. Online Bingo
+  if (config.onlineGames.bingoUrl && config.onlineGames.bingoUrl.startsWith('http')) {
+    buttons.push([
+      Markup.button.webApp('🎱 ኦንላይን ቢንጎ (Online Bingo)', `${config.onlineGames.bingoUrl}?tg_id=${userId}`)
+    ]);
+  } else {
+    buttons.push([Markup.button.callback('🎱 ኦንላይን ቢንጎ (Online Bingo)', 'GAME_SOON_BINGO')]);
+  }
+
+  // 2. Online Keno
+  if (config.onlineGames.kenoUrl && config.onlineGames.kenoUrl.startsWith('http')) {
+    buttons.push([
+      Markup.button.webApp('🔢 ኬኖ (Online Keno)', `${config.onlineGames.kenoUrl}?tg_id=${userId}`)
+    ]);
+  } else {
+    buttons.push([Markup.button.callback('🔢 ኬኖ (Online Keno)', 'GAME_SOON_KENO')]);
+  }
+
+  // 3. Aviator
+  if (config.onlineGames.aviatorUrl && config.onlineGames.aviatorUrl.startsWith('http')) {
+    buttons.push([
+      Markup.button.webApp('✈️ አቪዬተር (Aviator)', `${config.onlineGames.aviatorUrl}?tg_id=${userId}`)
+    ]);
+  } else {
+    buttons.push([Markup.button.callback('✈️ አቪዬተር (Aviator)', 'GAME_SOON_AVIATOR')]);
+  }
+
+  // Quick Online Wallet Top-up
+  buttons.push([Markup.button.callback('💰 ለኦንላይን ባላንስ ሙላ', 'DEPOSIT_MODE_ONLINE')]);
+
+  const msg =
+    `🎮 *ATD Online Gaming Hub*\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `💳 *የኦንላይን ዋሌት ባላንስዎ፦* *${Number(wallet.balance).toFixed(2)} ETB*\n\n` +
+    `⚠️ *ማሳሰቢያ፦* ይህ ባላንስ ለኦንላይን ጨዋታዎች ብቻ የሚያገለግል ሲሆን ከኦፍላይን ሱቅ ባላንስ ጋር አይቀላቀልም።\n\n` +
+    `👇 መጫወት የሚፈልጉትን ጨዋታ ይምረጡ፦`;
+
+  await ctx.reply(msg, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard(buttons)
+  });
+});
+
+bot.action('GAME_SOON_BINGO', (ctx) =>
+  ctx.answerCbQuery('🚧 ኦንላይን ቢንጎ በቅርብ ቀን ይከፈታል!', { show_alert: true })
+);
+bot.action('GAME_SOON_KENO', (ctx) =>
+  ctx.answerCbQuery('🚧 ኬኖ በቅርብ ቀን ይከፈታል!', { show_alert: true })
+);
+bot.action('GAME_SOON_AVIATOR', (ctx) =>
+  ctx.answerCbQuery('🚧 አቪዬተር በቅርብ ቀን ይከፈታል!', { show_alert: true })
+);
+
+// ============================================================================
+// DEPOSIT FLOW (MODE A: OFFLINE SHOP SYNC & MODE B: ONLINE GAME WALLET)
+// ============================================================================
+bot.hears('💰 ባላንስ መሙላት', async (ctx) => {
+  clearSession(ctx.from.id);
+
+  await ctx.reply(
+    `💰 *ባላንስ መሙላት (Deposit)*\n\n` +
+      `ባላንስ መሙላት የሚፈልጉትን አገልግሎት ይምረጡ፦`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🏪 ለኦፍላይን ቤት (Offline Shop Sync)', 'DEPOSIT_MODE_OFFLINE')],
+        [Markup.button.callback('🎮 ለኦንላይን ጨዋታ (Online Game Wallet)', 'DEPOSIT_MODE_ONLINE')]
+      ])
+    }
+  );
+});
+
+// --- MODE A STEP 1: SELECT / CONFIRM SHOP_ID & USERNAME ---
+bot.action('DEPOSIT_MODE_OFFLINE', async (ctx) => {
+  await ctx.answerCbQuery();
+  const userId = ctx.from.id;
+  const link = await db.getTelegramLink(userId);
+
+  if (link) {
+    const activeShop = await db.verifyActiveShop(link.shop_id, link.shop_username);
+    if (activeShop) {
+      const session = getSession(userId);
+      session.step = 'OFFLINE_CONFIRM_SHOP';
+      session.data = {
+        mode: 'OFFLINE_SHOP',
+        shopId: activeShop.shop_id,
+        shopUsername: activeShop.username
+      };
+
+      return ctx.reply(
+        `🏪 *የተመዘገበ ኦፍላይን ቤትዎ ተገኝቷል፦*\n\n` +
+          `🆔 *Shop ID:* \`${activeShop.shop_id}\`\n` +
+          `👤 *Username:* \`${activeShop.username}\`\n\n` +
+          `በዚህ መለያ መቀጠል ይፈልጋሉ?`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('✅ በዚህ ቀጥል', 'OFFLINE_USE_SAVED_SHOP')],
+            [Markup.button.callback('🔄 ሌላ Shop ID አስገባ', 'OFFLINE_ENTER_NEW_SHOP')]
+          ])
+        }
+      );
+    }
+  }
+
+  const session = getSession(userId);
+  session.step = 'OFFLINE_AWAIT_SHOP_PAIR';
+  session.data = { mode: 'OFFLINE_SHOP' };
+
+  await ctx.reply(
+    `🏪 *ደረጃ 1/4 — የኦፍላይን ቤት መለያ ያስገቡ*\n\n` +
+      `እባክዎ የቤትዎን *Shop ID* እና *Username* አንድ ላይ ያስገቡ (ለምሳሌ፦ \`SHOP-BF24C9E7 adis\`) ወይም ስልክ ቁጥርዎን ይጻፉ፦`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.action('OFFLINE_USE_SAVED_SHOP', async (ctx) => {
+  await ctx.answerCbQuery();
+  const session = getSession(ctx.from.id);
+  if (!session.data.shopId) {
+    return ctx.reply('⚠️ እባክዎ ከ *💰 ባላንስ መሙላት* እንደገና ይጀምሩ።');
+  }
+
+  session.step = 'DEPOSIT_AWAIT_AMOUNT';
+  await ctx.reply(
+    `💵 *ደረጃ 2/4 — የብር መጠን ያስገቡ*\n\n` +
+      `ወደ ኦፍላይን አፕሊኬሽንዎ Sync ማድረግ የሚፈልጉትን የብር መጠን ያስገቡ (ለምሳሌ፡ 20000)፦`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.action('OFFLINE_ENTER_NEW_SHOP', async (ctx) => {
+  await ctx.answerCbQuery();
+  const session = getSession(ctx.from.id);
+  session.step = 'OFFLINE_AWAIT_SHOP_PAIR';
+  session.data = { mode: 'OFFLINE_SHOP' };
+
+  await ctx.reply(
+    `🔄 እባክዎ *Shop ID* እና *Username* ያስገቡ (ለምሳሌ፦ \`SHOP-BF24C9E7 adis\`)፦`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// --- MODE B STEP 1: ONLINE GAME WALLET DEPOSIT ---
+bot.action('DEPOSIT_MODE_ONLINE', async (ctx) => {
+  await ctx.answerCbQuery();
+  const session = getSession(ctx.from.id);
+  session.step = 'DEPOSIT_AWAIT_AMOUNT';
+  session.data = { mode: 'ONLINE_GAME' };
+
+  await ctx.reply(
+    `🎮 *ለኦንላይን ጨዋታ ዋሌት ባላንስ መሙላት*\n\n` +
+      `ወደ ኦንላይን ዋሌትዎ ማስገባት የሚፈልጉትን የብር መጠን ያስገቡ (ለምሳሌ፡ 500)፦`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// Helper to display Step 3 Payment Accounts
+async function sendPaymentInstructions(ctx, sessionData) {
+  const targetInfo =
+    sessionData.mode === 'OFFLINE_SHOP'
+      ? `🏪 *አገልግሎት:* ኦፍላይን ቤት (Offline Shop Sync)\n🆔 *Shop ID:* \`${sessionData.shopId}\`\n👤 *Username:* \`${sessionData.shopUsername}\`\n`
+      : `🎮 *አገልግሎት:* ኦንላይን ጨዋታ ዋሌት (Online Game Wallet)\n`;
+
+  const msg =
+    `🏦 *ደረጃ 3/4 — ክፍያ የሚፈጸምባቸው አካውንቶች*\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `${targetInfo}` +
+    `💰 *የሚከፈል መጠን:* *${sessionData.amount} ETB*\n\n` +
+    `📱 *ቴሌብር (Telebirr):*\n` +
+    `   ቁጥር፦ \`${config.accounts.telebirrNumber}\` (${config.accounts.telebirrName})\n\n` +
+    `🏦 *የኢትዮጵያ ንግድ ባንክ (CBE):*\n` +
+    `   አካውንት፦ \`${config.accounts.cbeAccount}\` (${config.accounts.cbeName})\n\n` +
+    `🏦 *አቢሲኒያ ባንክ (Abyssinia Bank):*\n` +
+    `   አካውንት፦ \`${config.accounts.boaAccount}\` (${config.accounts.boaName})\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `📩 *ደረጃ 4/4 — ማረጋገጫ ይላኩ፦*\n` +
+    `ክፍያውን እንደፈጸሙ የደረሰዎትን *የባንክ/ቴሌብር SMS ጽሑፍ Copy-Paste አድርገው ይላኩ* ወይም *የደረሰኝ ፎቶ (Screenshot)* ይላኩ።`;
+
+  await ctx.reply(msg, { parse_mode: 'Markdown' });
+}
+
+// ============================================================================
+// NEW CENTER REGISTRATION (📝 አዲስ ቤት መመዝገብ)
+// ============================================================================
+bot.hears('📝 አዲስ ቤት መመዝገብ', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  session.step = 'REG_CENTER_NAME';
+  session.data = {};
+
+  await ctx.reply(
+    `📝 *አዲስ የATD Bingo ቤት መመዝገቢያ (1/5)*\n\n` +
+      `እባክዎ የቢንጎ/ኬኖ ቤትዎን *ስም (Center Name)* ያስገቡ፦`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// Admin inline approval for New Center Registration
+bot.action(/^APPROVE_SHOP:(.+):(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.answerCbQuery('⛔ ፈቃድ የለዎትም!', { show_alert: true });
+  }
+
+  const shopId = ctx.match[1];
+  const applicantTgId = Number(ctx.match[2]);
+
+  try {
+    const shop = await db.activateShop(shopId);
+    await db.saveTelegramLink({
+      telegramId: applicantTgId,
+      phone: shop.phone,
+      shopId: shop.shop_id,
+      shopUsername: shop.username
+    });
+
+    await ctx.editMessageText(
+      `${ctx.callbackQuery.message.text}\n\n✅ *ጸድቋል (ACTIVE)* — በ Admin ተረጋግጧል።`,
+      { parse_mode: 'Markdown' }
+    );
+
+    await bot.telegram.sendMessage(
+      applicantTgId,
+      `🎉 *እንኳን ደስ አለዎት! አዲስ ቤትዎ ጸድቋል!*\n\n` +
+        `🏪 *Shop ID:* \`${shop.shop_id}\`\n` +
+        `👤 *Username:* \`${shop.username}\`\n` +
+        `📊 *Status:* ACTIVE\n\n` +
+        `አሁን *📲 ኦፍላይን አፕ አውርድ* በመጫን ሶፍትዌሩን ማውረድ እና *💰 ባላንስ መሙላት* በመጫን ባላንስ መሙላት ይችላሉ!`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    await ctx.answerCbQuery(`❌ Error: ${err.message}`, { show_alert: true });
+  }
+});
+
+// ============================================================================
+// ADMIN DEPOSIT APPROVAL & REJECTION CALLBACKS
+// ============================================================================
+bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.answerCbQuery('⛔ ፈቃድ የለዎትም!', { show_alert: true });
+  }
+
+  const txUuid = ctx.match[1];
+  await ctx.answerCbQuery('⏳ በማጽደቅ ላይ...');
+
+  try {
+    // Check transaction mode first
+    const { data: tx } = await db.supabase
+      .from('transactions')
+      .select('*')
+      .eq('id', txUuid)
+      .single();
+
+    if (!tx || tx.status !== 'PENDING') {
+      return ctx.reply(`⚠️ ይህ ግብይት ቀድሞውኑ ተስተናግዷል (${tx?.status || 'NOT FOUND'})።`);
+    }
+
+    if (tx.mode === 'OFFLINE_SHOP') {
+      // 1. Execute Atomic Supabase RPC
+      const rpcResult = await db.approveOfflineDeposit(txUuid, ctx.from.id);
+      if (!rpcResult.success) {
+        return ctx.reply(`❌ ማጽደቅ አልተቻለም፦ ${rpcResult.error}`);
+      }
+
+      // 2. Push to ATD Control Dashboard (bingo-sync-api.onrender.com) with 3 retries
+      const syncResult = await pushToControlDashboard(
+        {
+          shop_id: rpcResult.shop_id,
+          username: rpcResult.username,
+          amount: rpcResult.amount,
+          ref_id: rpcResult.ref_id
+        },
+        notifyAdmins
+      );
+
+      await db.updateTransactionSyncStatus(
+        txUuid,
+        syncResult.success ? 'SYNCED' : 'FAILED'
+      );
+
+      const statusBadge = syncResult.success
+        ? '✅ ጸድቋል & ወደ Control Dashboard Sync ሆኗል!'
+        : '⚠️ Supabase ጸድቋል ነገር ግን Dashboard Sync አልተሳካም (Alert ተልኳል)';
+
+      if (ctx.callbackQuery.message.photo) {
+        await ctx.editMessageCaption(
+          `${ctx.callbackQuery.message.caption}\n\n${statusBadge}`,
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        await ctx.editMessageText(
+          `${ctx.callbackQuery.message.text}\n\n${statusBadge}`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      // 3. Notify User with Critical Wi-Fi Sync Instruction
+      const userSuccessMsg =
+        `✅ ክፍያዎ ተረጋግጧል! *${rpcResult.amount} ብር* ወደ *${rpcResult.username}* (Shop ID: \`${rpcResult.shop_id}\`) ተልኳል።\n\n` +
+        `⚠️ *ማሳሰቢያ፦* ባላንሱን ወደ አፕሊኬሽንዎ ለማስገባት መጀመሪያ ኮምፒውተርዎን/መሳሪያዎን ከዋይፋይ (ኢንተርኔት) ጋር ያገናኙ (Online ያድርጉ)፤ ከዚያም ATD Bingo አፕ ውስጥ ገብተው *"Sync Balance"* የሚለውን ይንኩ!`;
+
+      await bot.telegram.sendMessage(rpcResult.telegram_id, userSuccessMsg, {
+        parse_mode: 'Markdown'
+      });
+    } else {
+      // MODE B: ONLINE GAME WALLET APPROVAL
+      const rpcResult = await db.approveOnlineDeposit(txUuid, ctx.from.id);
+      if (!rpcResult.success) {
+        return ctx.reply(`❌ ማጽደቅ አልተቻለም፦ ${rpcResult.error}`);
+      }
+
+      const statusBadge = '✅ ጸድቋል! የኦንላይን ዋሌት ባላንስ ተጨምሯል።';
+      if (ctx.callbackQuery.message.photo) {
+        await ctx.editMessageCaption(
+          `${ctx.callbackQuery.message.caption}\n\n${statusBadge}`,
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        await ctx.editMessageText(
+          `${ctx.callbackQuery.message.text}\n\n${statusBadge}`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      await bot.telegram.sendMessage(
+        rpcResult.telegram_id,
+        `✅ *የኦንላይን ጨዋታ ዋሌት ክፍያዎ ተረጋግጧል!*\n\n` +
+          `💰 *የተጨመረ መጠን:* +${rpcResult.amount} ETB\n` +
+          `💳 *አዲስ የኦንላይን ባላንስ:* *${Number(rpcResult.new_balance).toFixed(2)} ETB*\n\n` +
+          `አሁን *🎮 ኦንላይን ጨዋታዎች* በመጫን መጫወት ይችላሉ!`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  } catch (err) {
+    console.error('Approval error:', err);
+    await ctx.reply(`❌ ስህተት ተፈጥሯል፦ ${err.message}`);
+  }
+});
+
+bot.action(/^REJECT_DEP:(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.answerCbQuery('⛔ ፈቃድ የለዎትም!', { show_alert: true });
+  }
+
+  const txUuid = ctx.match[1];
+  const rejected = await db.rejectTransaction(txUuid, ctx.from.id);
+
+  if (!rejected) {
+    return ctx.answerCbQuery('⚠️ ግብይቱ ቀድሞ ተስተናግዷል።', { show_alert: true });
+  }
+
+  if (ctx.callbackQuery.message.photo) {
+    await ctx.editMessageCaption(
+      `${ctx.callbackQuery.message.caption}\n\n❌ *ውድቅ ተደርጓል (REJECTED)*`,
+      { parse_mode: 'Markdown' }
+    );
+  } else {
+    await ctx.editMessageText(
+      `${ctx.callbackQuery.message.text}\n\n❌ *ውድቅ ተደርጓል (REJECTED)*`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  await bot.telegram.sendMessage(
+    rejected.telegram_id,
+    `❌ *የላኩት የክፍያ ማረጋገጫ (Ref: \`${rejected.transaction_id}\`) ውድቅ ተደርጓል።*\n` +
+      `ትክክለኛ የክፍያ ደረሰኝ መላክዎን ያረጋግጡ ወይም *📞 እርዳታ* የሚለውን በመጫን ያግኙን።`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ============================================================================
+// OFFLINE APP DISTRIBUTION (📲 ኦፍላይን አፕ አውርድ & ADMIN /setapp)
+// ============================================================================
+bot.command('setapp', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const repliedDoc = ctx.message.reply_to_message?.document;
+  if (!repliedDoc) {
+    return ctx.reply(
+      '⚠️ እባክዎ መጀመሪያ ~147MB–170MB የሆነውን `ATD-Bingo-Offline.zip` ፋይል ወደ ቦቱ ይላኩና በዚያ ፋይል ላይ **Reply** በማድረግ `/setapp` ይጻፉ።',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  await db.setAppSetting('offline_app_file_id', repliedDoc.file_id);
+  await db.setAppSetting('offline_app_filename', repliedDoc.file_name || 'ATD-Bingo-Offline.zip');
+
+  await ctx.reply(
+    `✅ *የኦፍላይን አፕ ፋይል በተሳካ ሁኔታ ተቀምጧል!*\n` +
+      `📦 *ፋይል:* \`${repliedDoc.file_name}\`\n` +
+      `🆔 *Cached File ID:* \`${repliedDoc.file_id}\``,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.hears('📲 ኦፍላይን አፕ አውርድ', async (ctx) => {
+  clearSession(ctx.from.id);
+  const cachedFileId = await db.getAppSetting('offline_app_file_id');
+
+  const installGuide =
+    `📲 *ATD Bingo Offline Software (~147MB - 170MB)*\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `🛠 *የአጫጫን እና አጠቃቀም መመሪያ፦*\n` +
+    `1️⃣ የወረደውን \`.zip\` ፋይል Right-Click አድርገው *"Extract All..."* (Unzip) ያድርጉት።\n` +
+    `2️⃣ Windows Defender / Antivirus ፋይሉን እንዳይዘጋው ፎልደሩን Exclusion ውስጥ ያስገቡ።\n` +
+    `3️⃣ ጨዋታው ሙሉ በሙሉ *ያለ ኢንተርኔት (Offline)* ይሰራል።\n\n` +
+    `⚠️ *እጅግ አስፈላጊ ማሳሰቢያ (Sync Balance):*\n` +
+    `ባላንስ ሲሞሉ ገንዘቡ ወደ አፑ እንዲገባ መጀመሪያ ኮምፒውተርዎን/መሳሪያዎን ከ *Wi-Fi / ኢንተርኔት* ጋር ያገናኙ (Online ያድርጉ)፤ ከዚያም አፑ ውስጥ ገብተው *"Sync Balance"* የሚለውን ይጫኑ!`;
+
+  if (cachedFileId) {
+    await ctx.reply('⏳ የኦፍላይን ሶፍትዌሩን በመላክ ላይ ነው...');
+    return ctx.replyWithDocument(cachedFileId, {
+      caption: installGuide,
+      parse_mode: 'Markdown'
+    });
+  }
+
+  if (config.offlineApp.downloadUrl && config.offlineApp.downloadUrl.startsWith('http')) {
+    return ctx.reply(installGuide, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.url('⬇️ ATD-Bingo-Offline.zip አውርድ', config.offlineApp.downloadUrl)]
+      ])
+    });
+  }
+
+  await ctx.reply(
+    `${installGuide}\n\n📌 የቀጥታ ማውረጃ ሊንክ ለማግኘት *📞 እርዳታ* የሚለውን በመጫን ያግኙን።`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ============================================================================
+// BALANCE, TRANSACTION HISTORY & SUPPORT / FAQS
+// ============================================================================
+bot.hears('💳 የእኔ ባላንስ', async (ctx) => {
+  clearSession(ctx.from.id);
+  const wallet = await db.ensureOnlineWallet(ctx.from.id, ctx.from.username);
+  const link = await db.getTelegramLink(ctx.from.id);
+
+  let offlineSection = `🏪 *1. የኦፍላይን ቤት (Offline Shop):*\n   🔗 ገና አልተገናኘም።`;
+  if (link) {
+    const shop = await db.verifyActiveShop(link.shop_id, link.shop_username);
+    offlineSection =
+      `🏪 *1. የኦፍላይን ቤት (Offline Shop):*\n` +
+      `   🆔 *Shop ID:* \`${link.shop_id}\`\n` +
+      `   👤 *Username:* \`${link.shop_username}\`\n` +
+      `   💰 *የተመዘገበ ባላንስ:* *${Number(shop?.balance || 0).toFixed(2)} ETB*\n` +
+      `   ℹ️ _(አፑ ውስጥ ባላንሱን ለማየት Wi-Fi አገናኝተው "Sync Balance" ይጫኑ)_`;
+  }
+
+  const onlineSection =
+    `🎮 *2. የኦንላይን ጨዋታ ዋሌት (Online Wallet):*\n` +
+    `   💳 *ቀሪ ባላንስ:* *${Number(wallet.balance).toFixed(2)} ETB*`;
+
+  await ctx.reply(
+    `💳 *የእርስዎ የATD Bingo ባላንሶች*\n━━━━━━━━━━━━━━━━━━━━\n\n${offlineSection}\n\n${onlineSection}`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.hears('📜 የግብይት ታሪክ', async (ctx) => {
+  clearSession(ctx.from.id);
+  const txs = await db.getUserTransactions(ctx.from.id, 10);
+
+  if (!txs.length) {
+    return ctx.reply('📜 እስካሁን ምንም የተመዘገበ የግብይት ታሪክ የለዎትም።');
+  }
+
+  const lines = txs.map((t, idx) => {
+    const icon = t.status === 'APPROVED' ? '✅' : t.status === 'REJECTED' ? '❌' : '⏳';
+    const modeLabel =
+      t.mode === 'OFFLINE_SHOP'
+        ? `🏪 Offline (${t.shop_id})`
+        : t.mode === 'ONLINE_GAME'
+        ? '🎮 Online Deposit'
+        : `🎲 ${t.mode}`;
+    return `${idx + 1}. ${icon} *${t.amount} ETB* — ${modeLabel}\n   Ref: \`${t.transaction_id}\` | Status: *${t.status}*`;
+  });
+
+  await ctx.reply(
+    `📜 *የቅርብ ጊዜ 10 ግብይቶችዎ፦*\n━━━━━━━━━━━━━━━━━━━━\n\n${lines.join('\n\n')}`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.hears('📞 እርዳታ', async (ctx) => {
+  clearSession(ctx.from.id);
+
+  const msg =
+    `📞 *የATD Bingo የደንበኞች አገልግሎት እና እርዳታ*\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `☎️ *ስልክ ቁጥር 1:* \`${config.support.phone1}\`\n` +
+    `☎️ *ስልክ ቁጥር 2:* \`${config.support.phone2}\`\n` +
+    `💬 *ቀጥታ ቴሌግራም:* @${config.support.telegramUsername}\n\n` +
+    `❓ *ተደጋጋሚ ጥያቄዎች (FAQs) — መልሱን ለማየት ከታች ይምረጡ፦*`;
+
+  await ctx.reply(msg, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.url('💬 በቴሌግራም በቀጥታ ያናግሩን', `https://t.me/${config.support.telegramUsername}`)],
+      [Markup.button.callback('💳 ባላንስ Sync አልሆነልኝም?', 'FAQ_SYNC')],
+      [Markup.button.callback('📲 ኦፍላይን አፕ አልከፈተልኝም?', 'FAQ_APP')],
+      [Markup.button.callback('🔗 Shop ID እና Username እንዴት ላገናኝ?', 'FAQ_LINK')],
+      [Markup.button.callback('🎮 ኦንላይን ጌም (Bingo/Keno/Aviator) እንዴት ልጫወት?', 'FAQ_ONLINE')]
+    ])
+  });
+});
+
+bot.action('FAQ_SYNC', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `💳 *ባላንስ Sync አልሆነልኝም? — መፍትሄ፦*\n\n` +
+      `1️⃣ ጨዋታው ኦፍላይን ቢሰራም ባላንስ ለመሳብ ግን ኮምፒውተርዎ/መሳሪያዎ በትክክል ከ *Wi-Fi ወይም ኢንተርኔት* ጋር መገናኘት (Online መሆን) አለበት።\n` +
+      `2️⃣ ኢንተርኔት ካገናኙ በኋላ ATD Bingo አፕ ውስጥ ገብተው *"Sync Balance"* የሚለውን ቁልፍ ይጫኑ።\n` +
+      `3️⃣ አሁንም ካልገባ የክፍያ ደረሰኝዎ በAdmin መጽደቁን *📜 የግብይት ታሪክ* ውስጥ ያረጋግጡ።`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.action('FAQ_APP', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `📲 *ኦፍላይን አፕ አልከፈተልኝም? — መፍትሄ፦*\n\n` +
+      `1️⃣ የወረደው ፋይል \`.zip\` ስለሆነ በቀጥታ ሳይሆን መጀመሪያ Right-Click አድርገው *"Extract All"* በማድረግ ፎልደሩን ያውጡት።\n` +
+      `2️⃣ Windows Defender / Antivirus አፑን እንዳይከለክለው ፎልደሩን *Virus & Threat Protection -> Exclusions* ውስጥ ያስገቡት።`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.action('FAQ_LINK', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `🔗 *Shop ID እና Username እንዴት ላገናኝ?*\n\n` +
+      `• `/start` በመንካት *"📱 ስልክ ቁጥሬን በማጋራት አገናኝ"* የሚለውን ይጫኑ፤ ወይም በቀጥታ \`SHOP-XXXXXXX\` ወይም \`Username\` በመጻፍ ይላኩ።\n` +
+      `• አዲስ ከሆኑ *📝 አዲስ ቤት መመዝገብ* የሚለውን ተጭነው ይመዝገቡ።`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.action('FAQ_ONLINE', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `🎮 *ኦንላይን ጌም (Bingo/Keno/Aviator) እንዴት ልጫወት?*\n\n` +
+      `1️⃣ መጀመሪያ *💰 ባላንስ መሙላት* -> *🎮 ለኦንላይን ጨዋታ (Online Game Wallet)* በመምረጥ ዋሌትዎን ይሙሉ።\n` +
+      `2️⃣ ከዚያ *🎮 ኦንላይን ጨዋታዎች (Bingo / Keno / Aviator)* የሚለውን ተጭነው የሚፈልጉትን ጌም ይክፈቱ።`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ============================================================================
+// CONVERSATIONAL TEXT & PHOTO HANDLER (DEPOSIT, REGISTRATION, QUICK SHOP LINK)
+// ============================================================================
+bot.on('photo', async (ctx) => {
+  const userId = ctx.from.id;
+  const session = getSession(userId);
+
+  if (session.step !== 'DEPOSIT_AWAIT_PROOF') {
+    return ctx.reply(
+      '📸 የክፍያ ደረሰኝ ፎቶ ለመላክ እባክዎ መጀመሪያ *💰 ባላንስ መሙላት* የሚለውን ይጫኑ።',
+      MAIN_MENU_KEYBOARD
+    );
+  }
+
+  const photos = ctx.message.photo;
+  const bestPhoto = photos[photos.length - 1];
+  const generatedRef = `IMG-${Date.now().toString(36).toUpperCase()}`;
+
+  await finalizeDepositProof(ctx, session, {
+    transactionId: generatedRef,
+    parsedAmount: session.data.amount,
+    paymentMethod: 'SCREENSHOT',
+    proofText: ctx.message.caption || 'Receipt Screenshot',
+    proofFileId: bestPhoto.file_id
+  });
 });
 
 bot.on('text', async (ctx) => {
+  const userId = ctx.from.id;
   const text = ctx.message.text.trim();
-  if (text.startsWith('/')) return;
-  if (text === '💰 ባላንስ መሙላት (Deposit)') {
-    if (!await requireLink(ctx)) return;
-    ctx.session.awaitingPaymentMethod = true;
-    await ctx.reply('የክፍያ ዘዴ ይምረጡ።', paymentChoices);
+  const session = getSession(userId);
+
+  // --- HANDLE ACTIVE CONVERSATION STEPS ---
+  if (session.step === 'OFFLINE_AWAIT_SHOP_PAIR') {
+    const parts = text.split(/\s+/);
+    let shop = null;
+
+    if (parts.length >= 2) {
+      shop = await db.verifyActiveShop(parts[0], parts[1]);
+    }
+    if (!shop) {
+      shop = await db.findShopByQuery(text);
+    }
+
+    if (!shop) {
+      return ctx.reply(
+        `❌ ያስገቡት Shop ID / Username አልተገኘም ወይም ACTIVE አይደለም።\n` +
+          `እባክዎ በትክክል ያስገቡ (ለምሳሌ፦ \`SHOP-BF24C9E7 adis\`) ወይም *📝 አዲስ ቤት መመዝገብ* ይጫኑ።`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    await db.saveTelegramLink({
+      telegramId: userId,
+      telegramUsername: ctx.from.username,
+      phone: shop.phone,
+      shopId: shop.shop_id,
+      shopUsername: shop.username
+    });
+
+    session.data.shopId = shop.shop_id;
+    session.data.shopUsername = shop.username;
+    session.step = 'DEPOSIT_AWAIT_AMOUNT';
+
+    return ctx.reply(
+      `✅ ቤትዎ ተረጋግጧል፦ \`${shop.shop_id}\` (\`${shop.username}\`)\n\n` +
+        `💵 *ደረጃ 2/4 — የብር መጠን ያስገቡ*\n` +
+        `ወደ ኦፍላይን አፕሊኬሽንዎ Sync ማድረግ የሚፈልጉትን የብር መጠን ያስገቡ (ለምሳሌ፡ 20000)፦`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  if (session.step === 'DEPOSIT_AWAIT_AMOUNT') {
+    const amount = parseFloat(text.replace(/,/g, ''));
+    if (Number.isNaN(amount) || amount < 10) {
+      return ctx.reply('⚠️ እባክዎ ትክክለኛ የብር መጠን በቁጥር ያስገቡ (ቢያንስ 10 ብር)፦');
+    }
+
+    session.data.amount = amount;
+    session.step = 'DEPOSIT_AWAIT_PROOF';
+    return sendPaymentInstructions(ctx, session.data);
+  }
+
+  if (session.step === 'DEPOSIT_AWAIT_PROOF') {
+    const parsed = parsePaymentSms(text);
+    if (!parsed.isValid) {
+      return ctx.reply(
+        `⚠️ ከላኩት መልዕክት ውስጥ የግብይት ቁጥር (Transaction ID) እና የብር መጠን ማግኘት አልተቻለም።\n` +
+          `እባክዎ ሙሉውን የቴሌብር/CBE/BOA SMS መልዕክት Copy-Paste ያድርጉ ወይም የደረሰኙን ፎቶ (Screenshot) ይላኩ።`
+      );
+    }
+
+    if (parsed.amount < session.data.amount) {
+      return ctx.reply(
+        `⚠️ በSMS የተገኘው መጠን (*${parsed.amount} ETB*) እርስዎ ከጠየቁት (*${session.data.amount} ETB*) ያነሰ ነው። እባክዎ ትክክለኛውን ደረሰኝ ይላኩ።`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    return finalizeDepositProof(ctx, session, {
+      transactionId: parsed.transactionId,
+      parsedAmount: parsed.amount,
+      paymentMethod: parsed.bank,
+      proofText: text,
+      proofFileId: null
+    });
+  }
+
+  // --- NEW CENTER REGISTRATION STEPS ---
+  if (session.step === 'REG_CENTER_NAME') {
+    session.data.centerName = text;
+    session.step = 'REG_USERNAME';
+    return ctx.reply('2️⃣ የመለያ ስም (*Username*) ያስገቡ (ለምሳሌ፦ `adis`)፦', { parse_mode: 'Markdown' });
+  }
+
+  if (session.step === 'REG_USERNAME') {
+    session.data.username = text.replace(/\s+/g, '');
+    session.step = 'REG_PHONE';
+    return ctx.reply('3️⃣ የባለቤቱን *ስልክ ቁጥር* ያስገቡ (ለምሳሌ፦ `0911223344`)፦', { parse_mode: 'Markdown' });
+  }
+
+  if (session.step === 'REG_PHONE') {
+    session.data.phone = text;
+    session.step = 'REG_REGION';
+    return ctx.reply('4️⃣ ክልል / ከተማ / አድራሻ (*Region/Address*) ያስገቡ፦', { parse_mode: 'Markdown' });
+  }
+
+  if (session.step === 'REG_REGION') {
+    session.data.region = text;
+    session.step = 'REG_MAC';
+    return ctx.reply(
+      '5️⃣ የኮምፒውተሩን *PC MAC Address* ያስገቡ (ካልታወቀ `N/A` ብለው ይጻፉ)፦',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  if (session.step === 'REG_MAC') {
+    session.data.macAddress = text;
+    try {
+      const newShop = await db.registerNewShop(session.data);
+      clearSession(userId);
+
+      await ctx.reply(
+        `✅ *የአዲስ ቤት ምዝገባ ጥያቄዎ ለAdmin ተልኳል!*\n\n` +
+          `🏪 *የቤት ስም:* ${newShop.center_name}\n` +
+          `🆔 *የተመደበ Shop ID:* \`${newShop.shop_id}\`\n` +
+          `👤 *Username:* \`${newShop.username}\`\n\n` +
+          `Admin እንዳጸደቀው ወዲያውኑ መልዕክት ይደርስዎታል።`,
+        { parse_mode: 'Markdown', ...MAIN_MENU_KEYBOARD }
+      );
+
+      const adminRegMsg =
+        `🆕 *አዲስ የATD Bingo ቤት ምዝገባ ጥያቄ*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🏪 *Center Name:* ${newShop.center_name}\n` +
+        `🆔 *Shop ID:* \`${newShop.shop_id}\`\n` +
+        `👤 *Username:* \`${newShop.username}\`\n` +
+        `📱 *Phone:* ${newShop.phone}\n` +
+        `📍 *Region:* ${newShop.region}\n` +
+        `💻 *MAC Address:* \`${newShop.mac_address}\`\n` +
+        `🙋 *Telegram ID:* \`${userId}\``;
+
+      await notifyAdmins(
+        adminRegMsg,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('✅ አጽድቅ (Activate Shop)', `APPROVE_SHOP:${newShop.shop_id}:${userId}`)]
+        ])
+      );
+    } catch (err) {
+      clearSession(userId);
+      await ctx.reply(`❌ ምዝገባው አልተሳካም፦ ${err.message}`, MAIN_MENU_KEYBOARD);
+    }
     return;
   }
-  if (text === '💳 የእኔ ባላንስ (My Balance)') {
-    const link = await requireLink(ctx);
-    if (!link) return;
-    const account = await getAccount(link.user_id);
-    return ctx.reply(account ? `💳 የአሁኑ ባላንስዎ፡ ${formatMoney(account.balance)}` : 'መለያው አልተገኘም።', menu);
+
+  // --- QUICK SHOP LINKING IF USER TYPES SHOP-XXXXXXX OR PHONE OR USERNAME ---
+  const quickShop = await db.findShopByQuery(text);
+  if (quickShop) {
+    await db.saveTelegramLink({
+      telegramId: userId,
+      telegramUsername: ctx.from.username,
+      phone: quickShop.phone,
+      shopId: quickShop.shop_id,
+      shopUsername: quickShop.username
+    });
+
+    return ctx.reply(
+      `✅ *ቤትዎ በተሳካ ሁኔታ ተገናኝቷል!*\n` +
+        `🏪 *Shop ID:* \`${quickShop.shop_id}\` | 👤 *Username:* \`${quickShop.username}\``,
+      { parse_mode: 'Markdown', ...MAIN_MENU_KEYBOARD }
+    );
   }
-  if (text === '📜 የግብይት ታሪክ (History)') {
-    const link = await requireLink(ctx);
-    if (!link) return;
-    const { data, error } = await supabase.from('transactions')
-      .select('amount,payment_method,transaction_id,status,created_at')
-      .eq('user_id', link.user_id).order('created_at', { ascending: false }).limit(10);
-    if (error) throw error;
-    if (!data.length) return ctx.reply('የግብይት ታሪክ የለም።', menu);
-    const statuses = { pending: 'በመጠባበቅ ላይ', approved: 'ጸድቋል', rejected: 'ውድቅ ሆኗል' };
-    return ctx.reply(data.map((item) =>
-      `${new Date(item.created_at).toLocaleDateString('am-ET')} · ${formatMoney(item.amount)} · ${paymentLabels[item.payment_method]} · ${statuses[item.status]}\nID: ${item.transaction_id}`,
-    ).join('\n\n'), menu);
-  }
-  if (text === '📞 እርዳታ (Support)') {
-    ctx.session.awaitingSupport = true;
-    return ctx.reply('እባክዎ የእርዳታ ጥያቄዎን አሁን ይጻፉ። /cancel በመጠቀም መሰረዝ ይችላሉ።');
-  }
-  if (ctx.session.awaitingLink) {
-    const account = await linkByIdentifier(text);
-    if (!account) return ctx.reply('ይህ መረጃ ከATD Bingo መለያ ጋር አልተገናኘም። እንደገና ይሞክሩ ወይም የተመዘገበውን ስልክ በእውቂያ ያጋሩ።');
-    await saveLink(ctx.from.id, account.id);
-    ctx.session = {};
-    return ctx.reply(mainMenuMessage(), menu);
-  }
-  if (ctx.session.awaitingSupport) {
-    ctx.session.awaitingSupport = false;
-    await bot.telegram.sendMessage(config.supportTelegramId, `የእርዳታ ጥያቄ\nTelegram ID: ${ctx.from.id}\nTelegram: ${ctx.from.username || ctx.from.first_name}\n\n${text}`);
-    return ctx.reply('የእርዳታ ጥያቄዎ ተልኳል።', menu);
-  }
-  if (ctx.session.awaitingReceipt) {
-    const method = ctx.session.awaitingReceipt;
-    ctx.session.awaitingReceipt = null;
-    return submitDeposit(ctx, method, text);
-  }
-  if (!await requireLink(ctx)) return;
-  await ctx.reply('እባክዎ ከምናሌው አንዱን ይምረጡ።', menu);
 });
 
-bot.on('photo', async (ctx) => {
-  if (!await requireLink(ctx)) return;
-  if (!ctx.session.awaitingReceipt) {
-    return ctx.reply('መጀመሪያ ከምናሌው የባላንስ መሙያ ዘዴ ይምረጡ።', menu);
-  }
-  const method = ctx.session.awaitingReceipt;
-  ctx.session.awaitingReceipt = null;
-  const caption = ctx.message.caption || '';
-  return submitDeposit(ctx, method, caption, ctx.message.photo.at(-1).file_id);
-});
+// Helper to check duplicates, save pending transaction, and forward to Admin
+async function finalizeDepositProof(ctx, session, proof) {
+  const userId = ctx.from.id;
 
-bot.catch((error, ctx) => {
-  console.error('Bot update failed:', error);
-  if (ctx?.chat?.id) void ctx.reply('ችግር ተፈጥሯል። እባክዎ ቆይተው እንደገና ይሞክሩ ወይም እርዳታን ያግኙ።').catch(() => {});
-});
+  try {
+    const duplicate = await db.isTransactionDuplicate(proof.transactionId);
+    if (duplicate) {
+      return ctx.reply(
+        `🚫 *ማስጠንቀቂያ፦ ይህ የግብይት ቁጥር (\`${proof.transactionId}\`) ቀድሞ ጥቅም ላይ ውሏል!*\n` +
+          `እባክዎ አዲስ የክፍያ ማረጋገጫ ይላኩ።`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    const tx = await db.createPendingTransaction({
+      transactionId: proof.transactionId,
+      telegramId: userId,
+      mode: session.data.mode,
+      shopId: session.data.shopId || null,
+      shopUsername: session.data.shopUsername || null,
+      amount: session.data.amount,
+      parsedAmount: proof.parsedAmount,
+      paymentMethod: proof.paymentMethod,
+      proofText: proof.proofText,
+      proofFileId: proof.proofFileId
+    });
+
+    clearSession(userId);
+
+    await ctx.reply(
+      `⏳ *የክፍያ ማረጋገጫዎ በተሳካ ሁኔታ ተልኳል!*\n\n` +
+        `🧾 *Ref ID:* \`${tx.transaction_id}\`\n` +
+        `💰 *መጠን:* ${tx.amount} ETB\n\n` +
+        `Admin እንዳረጋገጠው ወዲያውኑ መልዕክት ይደርስዎታል።`,
+      { parse_mode: 'Markdown', ...MAIN_MENU_KEYBOARD }
+    );
+
+    const typeHeader =
+      tx.mode === 'OFFLINE_SHOP'
+        ? `🏪 *Type:* OFFLINE_SHOP\n🆔 *Shop ID:* \`${tx.shop_id}\`\n👤 *Username:* \`${tx.shop_username}\`\n`
+        : `🎮 *Type:* ONLINE_GAME\n`;
+
+    const adminCaption =
+      `💰 *አዲስ የክፍያ ማረጋገጫ (Deposit Request)*\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `${typeHeader}` +
+      `💵 *Requested Amount:* *${tx.amount} ETB*\n` +
+      `📊 *Parsed Amount:* ${tx.parsed_amount || tx.amount} ETB\n` +
+      `🧾 *Transaction ID:* \`${tx.transaction_id}\`\n` +
+      `🏦 *Method:* ${tx.payment_method}\n` +
+      `🙋 *User TG:* \`${userId}\` (@${ctx.from.username || 'N/A'})`;
+
+    const approveLabel =
+      tx.mode === 'OFFLINE_SHOP'
+        ? '✅ አጽድቅና Sync አድርግ (Approve & Sync)'
+        : '✅ አጽድቅ (Approve Online Wallet)';
+
+    const inlineKb = Markup.inlineKeyboard([
+      [Markup.button.callback(approveLabel, `APPROVE_DEP:${tx.id}`)],
+      [Markup.button.callback('❌ ውድቅ አድርግ (Reject)', `REJECT_DEP:${tx.id}`)]
+    ]);
+
+    for (const adminId of config.adminIds) {
+      if (proof.proofFileId) {
+        await bot.telegram.sendPhoto(adminId, proof.proofFileId, {
+          caption: adminCaption,
+          parse_mode: 'Markdown',
+          ...inlineKb
+        });
+      } else {
+        await bot.telegram.sendMessage(
+          adminId,
+          `${adminCaption}\n\n📩 *SMS Proof:*\n\`${proof.proofText}\``,
+          { parse_mode: 'Markdown', ...inlineKb }
+        );
+      }
+    }
+  } catch (err) {
+    console.error('Deposit submission error:', err);
+    await ctx.reply(`❌ ስህተት ተፈጥሯል፦ ${err.message}`, MAIN_MENU_KEYBOARD);
+  }
+}
+
+module.exports = { bot, notifyAdmins };
