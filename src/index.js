@@ -1,22 +1,53 @@
-import { app } from './webhook.js';
-import { bot } from './bot.js';
-import { config } from './config.js';
+const express = require('express');
+const cron = require('node-cron');
+const axios = require('axios');
+const config = require('./config');
+const webhookRoutes = require('./webhook');
+const { bot } = require('./bot');
 
-const server = app.listen(config.port, () => console.log(`Health and SMS webhook listening on port ${config.port}`));
+const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-try {
-  await bot.launch();
-  console.log('ATD Bingo Telegram bot started');
-} catch (error) {
-  server.close();
-  console.error('Bot startup failed:', error);
-  process.exitCode = 1;
+// Attach Health, SMS Forwarder Webhook & Online Game Wallet REST APIs
+app.use('/', webhookRoutes);
+
+// 24/7 Render Keep-Alive Cron (Pings /health every 10 minutes so Render never sleeps)
+cron.schedule('*/10 * * * *', async () => {
+  const targetUrl = config.server.renderExternalUrl
+    ? `${config.server.renderExternalUrl}/health`
+    : `http://localhost:${config.server.port}/health`;
+
+  try {
+    await axios.get(targetUrl, { timeout: 8000 });
+    console.log(`💓 [Keep-Alive] Pinged ${targetUrl} at ${new Date().toISOString()}`);
+  } catch (err) {
+    console.error(`⚠️ [Keep-Alive] Ping failed: ${err.message}`);
+  }
+});
+
+// Start Express Server & Launch Telegram Bot
+const server = app.listen(config.server.port, async () => {
+  console.log(`🚀 ATD Bingo HTTP Server listening on port ${config.server.port}`);
+
+  try {
+    await bot.launch();
+    console.log('🤖 @atd_bingo_bot is live and running (Mode A: Offline Sync + Mode B: Online Games)!');
+  } catch (err) {
+    console.error('❌ Failed to launch Telegram bot:', err);
+    process.exit(1);
+  }
+});
+
+// Graceful Shutdown
+function shutdown(signal) {
+  console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
+  bot.stop(signal);
+  server.close(() => {
+    console.log('✅ HTTP Server closed.');
+    process.exit(0);
+  });
 }
 
-const shutdown = (signal) => {
-  console.log(`${signal} received, shutting down`);
-  bot.stop(signal);
-  server.close(() => process.exit(0));
-};
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
