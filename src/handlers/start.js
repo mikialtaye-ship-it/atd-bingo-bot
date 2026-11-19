@@ -3,13 +3,19 @@ const sessionStore = require('../utils/sessionStore');
 const amharicKeyboards = require('../keyboards/amharicKeyboards');
 const logger = require('../utils/logger');
 
+const backKeyboard = {
+  reply_markup: {
+    keyboard: [[{ text: '❌ ተመለስ' }]],
+    resize_keyboard: true,
+  },
+};
+
 const startHandler = {
   /**
    * Handle /start command
    */
   async handleStart(ctx) {
     const telegramId = ctx.from.id;
-    const telegramUsername = ctx.from.username || null;
     const firstName = ctx.from.first_name || 'ተጫዋች';
 
     try {
@@ -17,18 +23,18 @@ const startHandler = {
       const user = await supabaseService.getUserByTelegramId(telegramId);
 
       if (user) {
-        // User already linked
         const balance = Number(user.balance || 0).toFixed(2);
         const welcomeBackMsg =
           `👋 ሰላም <b>${user.username || firstName}</b>! እንኳን ወደ <b>ATD Bingo</b> በደህና መጡ!\n\n` +
-          `💳 <b>የአካውንትዎ ባላንስ:</b> <code>${balance} ብር</code>\n` +
-          `📱 <b>ስልክ ቁጥር:</b> <code>${user.phone || 'N/A'}</code>\n\n` +
+          `🏪 <b>Shop ID:</b> <code>${user.shop_id || 'N/A'}</code>\n` +
+          `👤 <b>Username:</b> <code>${user.username || 'N/A'}</code>\n` +
+          `💳 <b>የአካውንትዎ ባላንስ:</b> <code>${balance} ብር</code>\n\n` +
           `ከታች ካሉት አማራጮች የሚፈልጉትን ይምረጡ:`;
 
         return ctx.replyWithHTML(welcomeBackMsg, amharicKeyboards.mainMenu());
       }
 
-      // 2. User not linked yet - prompt for account linking
+      // 2. User not linked yet - prompt for Shop ID or Username
       sessionStore.set(telegramId, { step: 'AWAITING_ACCOUNT_LINK' });
 
       const linkPrompt =
@@ -40,10 +46,9 @@ const startHandler = {
         `• የሂሳብ ቀሪዎን እና የግብይት ታሪክዎን መከታተል\n` +
         `• የ 24/7 ፈጣን የደንበኞች ድጋፍ ማግኘት\n\n` +
         `⚠️ <b>ለመጀመር እባክዎ የ ATD Bingo አካውንትዎን ያገናኙ:</b>\n\n` +
-        `👉 በ ATD Bingo የተመዘገቡበትን <b>ስልክ ቁጥር</b> ወይም <b>Username</b> እዚህ ይጻፉልን።\n` +
-        `ወይም ከታች ያለውን <b>"📱 ስልክ ቁጥር ላክ"</b> የሚለውን ቁልፍ ይጫኑ:`;
+        `👉 በ ATD Bingo የተመዘገቡበትን <b>Shop ID</b> (ምሳሌ፡ <code>SHOP-BF24C9E7</code>) ወይም <b>Username</b> (ምሳሌ፡ <code>adis</code>) እዚህ ይጻፉልን:`;
 
-      return ctx.replyWithHTML(linkPrompt, amharicKeyboards.requestContact());
+      return ctx.replyWithHTML(linkPrompt, backKeyboard);
     } catch (err) {
       logger.error('Error handling /start:', err.message);
       return ctx.reply(
@@ -53,22 +58,17 @@ const startHandler = {
   },
 
   /**
-   * Handle contact sharing via Telegram Contact button
+   * Handle contact sharing fallback
    */
   async handleContact(ctx) {
-    const telegramId = ctx.from.id;
-    const contact = ctx.message.contact;
-
-    if (!contact || !contact.phone_number) {
-      return ctx.reply('ስልክ ቁጥር ማግኘት አልተቻለም። እባክዎ ስልክ ቁጥርዎን በእጅ ጽፈው ይላኩ።');
-    }
-
-    const phoneNumber = contact.phone_number;
-    return startHandler.linkWithIdentifier(ctx, telegramId, ctx.from.username, phoneNumber);
+    return ctx.reply(
+      'እባክዎ ስልክ ቁጥር ሳይሆን የሱቅዎን Shop ID (ምሳሌ፡ SHOP-BF24C9E7) ወይም Username ይጻፉልን።',
+      backKeyboard
+    );
   },
 
   /**
-   * Process identifier (username or phone) to link account
+   * Process identifier (Shop ID or Username) to link account
    */
   async linkWithIdentifier(ctx, telegramId, telegramUsername, identifier) {
     const searchingMsg = await ctx.reply('🔍 አካውንትዎን በማረጋገጥ ላይ፣ እባክዎ ትንሽ ይጠብቁ...');
@@ -86,12 +86,11 @@ const startHandler = {
         const balance = Number(result.balance || 0).toFixed(2);
         const successMsg =
           `✅ <b>እንኳን ደስ አለዎት! አካውንትዎ በተሳካ ሁኔታ ተገናኝቷል።</b>\n\n` +
-          `👤 <b>የተጠቃሚ ስም:</b> <code>${result.username}</code>\n` +
-          `📱 <b>ስልክ ቁጥር:</b> <code>${result.phone}</code>\n` +
+          `🏪 <b>Shop ID:</b> <code>${result.shop_id || 'N/A'}</code>\n` +
+          `👤 <b>የተጠቃሚ ስም (Username):</b> <code>${result.username}</code>\n` +
           `💳 <b>የአሁን ባላንስዎ:</b> <code>${balance} ብር</code>\n\n` +
           `አሁን ከታች ባለው ሜኑ በመጠቀም ባላንስ መሙላት ወይም ኦፍላይን አፑን ማውረድ ይችላሉ:`;
 
-        // Delete searching message
         try {
           await ctx.deleteMessage(searchingMsg.message_id);
         } catch (_) {}
@@ -108,12 +107,12 @@ const startHandler = {
 
       const notFoundMsg =
         `❌ <b>ይቅርታ፣ በ "${identifier}" የተመዘገበ አካውንት አልተገኘም!</b>\n\n` +
-        `እባክዎ በትክክል መመዝገብዎን ያረጋግጡ:\n` +
-        `1. በጨዋታው ላይ የተመዘገቡበትን ስልክ ቁጥር (ምሳሌ፡ <code>0911223344</code>) ያስገቡ\n` +
-        `2. ወይም ትክክለኛውን Username ያስገቡ\n\n` +
+        `እባክዎ ትክክለኛውን መረጃ ማስገባትዎን ያረጋግጡ:\n` +
+        `1. የሱቅ መለያ <b>Shop ID</b> (ምሳሌ፡ <code>SHOP-BF24C9E7</code>) ያስገቡ\n` +
+        `2. ወይም ትክክለኛውን <b>Username</b> (ምሳሌ፡ <code>adis</code>) ያስገቡ\n\n` +
         `አዲስ ተጠቃሚ ከሆኑ ወይም ድጋፍ ከፈለጉ ከታች ያለውን <b>📞 እርዳታ</b> ቁልፍ ይጫኑ።`;
 
-      return ctx.replyWithHTML(notFoundMsg, amharicKeyboards.requestContact());
+      return ctx.replyWithHTML(notFoundMsg, backKeyboard);
     } catch (err) {
       logger.error('Error linking account with identifier:', err.message);
       return ctx.reply('አካውንት በማገናኘት ላይ ችግር አጋጥሟል። እባክዎ እንደገና ይሞክሩ።');
