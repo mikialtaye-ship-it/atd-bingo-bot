@@ -21,25 +21,25 @@ function optional(name, fallback = '') {
 
 module.exports = {
   // ── Telegram ──────────────────────────────────────────────────
-  BOT_TOKEN:                  required('BOT_TOKEN'),
-  ADMIN_TELEGRAM_ID:          required('ADMIN_TELEGRAM_ID'),
-  SUPPORT_TELEGRAM_USERNAME:  optional('SUPPORT_TELEGRAM_USERNAME', 'atd_support'),
+  BOT_TOKEN:                  required('8942847715:AAFDaojtg7klZ3v81rK5GMYawL9H001HEok'),
+  ADMIN_TELEGRAM_ID:          required('8802165407'),
+  SUPPORT_TELEGRAM_USERNAME:  optional('@atdbingo', 'atd_support'),
 
   // ── Supabase ──────────────────────────────────────────────────
-  SUPABASE_URL:               required('SUPABASE_URL'),
-  SUPABASE_SERVICE_ROLE_KEY:  required('SUPABASE_SERVICE_ROLE_KEY'),
+  SUPABASE_URL:               required('https://zriwaxchecfffaiblchi.supabase.co'),
+  SUPABASE_SERVICE_ROLE_KEY:  required('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpyaXdheGNoZWNmZmZhaWJsY2hpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ2NDk5NjgsImV4cCI6MjExMDIyNTk2OH0.fZz6nIxtoM9faLVu1Msb4wAwEvRTiZvfpvcFLuB2qP8'),
 
   // ── ATD Control Dashboard ─────────────────────────────────────
   SYNC_API_URL:    optional('SYNC_API_URL', 'https://bingo-sync-api.onrender.com'),
-  SYNC_API_SECRET: required('SYNC_API_SECRET'),
+  SYNC_API_SECRET: required('atd_bingo_2026_secret'),
 
   // ── Payment Accounts ──────────────────────────────────────────
-  TELEBIRR_NUMBER: optional('TELEBIRR_NUMBER'),
-  TELEBIRR_NAME:   optional('TELEBIRR_NAME', 'ATD Bingo'),
-  CBE_ACCOUNT:     optional('CBE_ACCOUNT'),
-  CBE_NAME:        optional('CBE_NAME', 'ATD Bingo'),
-  BOA_ACCOUNT:     optional('BOA_ACCOUNT'),
-  BOA_NAME:        optional('BOA_NAME', 'ATD Bingo'),
+  TELEBIRR_NUMBER: optional('0969920066'),
+  TELEBIRR_NAME:   optional('ADDIS ALTAYE ALEMU', 'ATD Bingo'),
+  CBE_ACCOUNT:     optional('1000230528156'),
+  CBE_NAME:        optional('ADDIS ALTAYE ALEMU', 'ATD Bingo'),
+  BOA_ACCOUNT:     optional('48110479'),
+  BOA_NAME:        optional('ADDIS ALTAYE ALEMU', 'ATD Bingo'),
 
   // ── Support ───────────────────────────────────────────────────
   SUPPORT_PHONE_1: optional('SUPPORT_PHONE_1', '0962025699'),
