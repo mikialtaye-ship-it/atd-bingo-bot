@@ -21,7 +21,7 @@ function optional(name, fallback = '') {
 
 module.exports = {
   // ── Telegram ──────────────────────────────────────────────────
-  BOT_TOKEN:                  required('8942847715:AAHs5kU90k4oy_iQLssOUFoM2UDjfkJ5CNI'),
+  BOT_TOKEN:                  required('8942847715:AAFI3qd_bsirGjt4GtTUzx8jTLwCKBnYny8'),
   ADMIN_TELEGRAM_ID:          required('8802165407'),
   SUPPORT_TELEGRAM_USERNAME:  optional('@atdbingo', 'atd_support'),
 
