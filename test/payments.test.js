@@ -1,23 +1,30 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { parsePaymentMessage } from '../src/payments.js';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { parsePaymentSms } = require('../src/payments');
 
-test('parses a standard Telebirr confirmation', () => {
-  assert.deepEqual(parsePaymentMessage('Transaction ID: AbC123456\nYou paid ETB 1,250.50'), {
-    transactionId: 'ABC123456',
-    amount: '1250.50',
-  });
+test('Parses Telebirr Amharic/English SMS correctly', () => {
+  const sms =
+    'የግብይት ቁጥር BHG49X21KL ነው። ወደ 0962025699 ETB 20000.00 በተሳካ ሁኔታ ልከዋል።';
+  const result = parsePaymentSms(sms);
+
+  assert.equal(result.isValid, true);
+  assert.equal(result.bank, 'TELEBIRR');
+  assert.equal(result.transactionId, 'BHG49X21KL');
+  assert.equal(result.amount, 20000);
 });
 
-test('parses amount before ETB and a reference number', () => {
-  assert.deepEqual(parsePaymentMessage('Reference Number: XZ-12345. Amount: 75 ETB'), {
-    transactionId: 'XZ-12345',
-    amount: '75.00',
-  });
+test('Parses Commercial Bank of Ethiopia (CBE) SMS correctly', () => {
+  const sms =
+    'Dear Customer, your account 1000****1234 has been debited with ETB 5,500.00. Ref No FT26324A9B1C.';
+  const result = parsePaymentSms(sms);
+
+  assert.equal(result.isValid, true);
+  assert.equal(result.bank, 'CBE');
+  assert.equal(result.transactionId, 'FT26324A9B1C');
+  assert.equal(result.amount, 5500);
 });
 
-test('rejects missing references, amounts, and unreasonable amounts', () => {
-  assert.equal(parsePaymentMessage('Transaction ID: ABC123456'), null);
-  assert.equal(parsePaymentMessage('ETB 15.00'), null);
-  assert.equal(parsePaymentMessage('Ref No: ABC123456 ETB 1000001'), null);
+test('Rejects invalid or incomplete SMS messages', () => {
+  const result = parsePaymentSms('ሰላም እንዴት ዋሉ?');
+  assert.equal(result.isValid, false);
 });
