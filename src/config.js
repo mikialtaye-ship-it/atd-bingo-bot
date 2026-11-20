@@ -28,7 +28,7 @@ const config = {
 
   accounts: {
     telebirrNumber: process.env.TELEBIRR_NUMBER || '0962025699',
-    telebirrName: process.env.TELEBIRR_NAME || 'ADDIS ALTAYE ALEMU,
+    telebirrName: process.env.TELEBIRR_NAME || 'ADDIS ALTAYE ALEMU',
     cbeAccount: process.env.CBE_ACCOUNT || '1000230528156',
     cbeName: process.env.CBE_NAME || 'ADDIS ALTAYE ALEMU',
     boaAccount: process.env.BOA_ACCOUNT || '48110479',
