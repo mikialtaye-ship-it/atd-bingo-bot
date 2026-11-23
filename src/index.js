@@ -31,6 +31,10 @@ const server = app.listen(config.server.port, async () => {
   console.log(`🚀 ATD Bingo HTTP Server listening on port ${config.server.port}`);
 
   try {
+    // የቆየ Webhook ካለ ያጠፋል
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log('🧹 Cleared old webhooks...');
+
     await bot.launch();
     console.log('🤖 @atd_bingo_bot is live and running (Mode A: Offline Sync + Mode B: Online Games)!');
   } catch (err) {
