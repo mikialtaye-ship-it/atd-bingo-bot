@@ -10,7 +10,6 @@ if (isPhoto || isText) {
 
   // 1. ዳታቤዝ (transactions) ላይ status: 'pending' ብሎ መመዝገብ
   // (ከዚህ በፊት የነበረውን አውቶማቲክ የቴሌብር SMS ማረጋገጫ ቼክ አንስተህ ሁሉም ወደ Admin እንዲሄድ ማድረግ)
-  const { data: tx, error } = await supabase...
     .from('transactions')
     .insert({
       user_id: ctx.from.id,
@@ -62,4 +61,5 @@ if (isPhoto || isText) {
     });
   }
 }
+
 
