@@ -1,86 +1,64 @@
-const ADMIN_ID = process.env.ADMIN_CHAT_ID || '658002856';
+const express = require('express');
+const cron = require('node-cron');
+const axios = require('axios');
+const config = require('./config');
+const webhookRoutes = require('./webhook');
+const { bot } = require('./bot');
 
-// 1. ተጠቃሚው ስክሪንሾት (Photo) ሲልክ ወደ አድሚን መላክ
-bot.on('photo', async (ctx) => {
-  // እዚህ ጋር የተጠቃሚውን ሴሽን (shop_id, shop_username, sync_amount) ታገኛለህ
-  const photoFileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-  
-  // ዳታቤዝ (transactions) ላይ status: 'pending' ብለህ ሴቭ ታደርጋለህ
-  const { data: tx, error } = await supabase
-    .from('transactions')
-    .insert({
-      user_id: ctx.from.id,
-      shop_id: userSession.shop_id,
-      shop_username: userSession.shop_username,
-      sync_amount: userSession.sync_amount,
-      mode: 'offline_sync',
-      status: 'pending'
-    })
-    .select()
-    .single();
+const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-  if (error) {
-    return ctx.reply(`❌ ስህተት ተፈጥሯል፦ ${error.message}`);
+// Attach Health, SMS Forwarder Webhook & Online Game Wallet REST APIs
+app.use('/', webhookRoutes);
+
+// 24/7 Render Keep-Alive Cron (Pings /health every 10 minutes so Render never sleeps)
+cron.schedule('*/10 * * * *', async () => {
+  const targetUrl = config.server.renderExternalUrl
+    ? `${config.server.renderExternalUrl}/health`
+    : `http://localhost:${config.server.port}/health`;
+
+  try {
+    await axios.get(targetUrl, { timeout: 8000 });
+    console.log(`💓 [Keep-Alive] Pinged ${targetUrl} at ${new Date().toISOString()}`);
+  } catch (err) {
+    console.error(`⚠️ [Keep-Alive] Ping failed: ${err.message}`);
   }
+});
 
-  // ለተጠቃሚው ማሳወቅ
-  await ctx.reply('⏳ ደረሰኝዎ ለአድሚን ተልኳል። አድሚኑ እንዳረጋገጠ ሲንክ ይደረግልዎታል።');
+// Start Express Server & Launch Telegram Bot
+const server = app.listen(config.server.port, async () => {
+  console.log(`🚀 ATD Bingo HTTP Server listening on port ${config.server.port}`);
 
-  // ለአድሚን (ወደ አንተ) ስክሪንሾቱን ከ Approve/Reject ቁልፍ ጋር መላክ
-  await ctx.telegram.sendPhoto(ADMIN_ID, photoFileId, {
-    caption: `🔔 **አዲስ የ Sync ጥያቄ**\n\n` +
-             `🏪 **Shop ID:** ${tx.shop_id}\n` +
-             `👤 **Username:** ${tx.shop_username}\n` +
-             `💰 **Sync የሚደረግ መጠን:** ${tx.sync_amount} ETB\n` +
-             `🆔 **Transaction ID:** ${tx.id}`,
-    parse_mode: 'Markdown',
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: `✅ Approve (${tx.sync_amount} ETB)`, callback_data: `approve_tx_${tx.id}` },
-          { text: '❌ Reject', callback_data: `reject_tx_${tx.id}` }
-        ]
-      ]
-    }
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log('🧹 Cleared old webhooks...');
+
+    await bot.launch();
+    console.log('🤖 @atd_bingo_bot is live and running (Mode A: Offline Sync + Mode B: Online Games)!');
+  } catch (err) {
+    console.error('❌ Failed to launch Telegram bot:', err);
+  }
+});
+
+// ቦቱ በትንሽ ስህተት ምክንያት ክራሽ አድርጎ እንዳይዘጋ መከላከያ
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught Exception:', err);
+});
+
+// Graceful Shutdown
+function shutdown(signal) {
+  console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
+  bot.stop(signal);
+  server.close(() => {
+    console.log('✅ HTTP Server closed.');
+    process.exit(0);
   });
-});
+}
 
-// 2. አድሚኑ Approve ወይም Reject ሲጫን የሚሰራ
-bot.action(/^(approve|reject)_tx_(.+)$/, async (ctx) => {
-  const action = ctx.match[1]; // 'approve' ወይም 'reject'
-  const txId = ctx.match[2];
-
-  // ዳታቤዙን ማዘመን (Update)
-  const newStatus = action === 'approve' ? 'approved' : 'rejected';
-  const { data: tx, error } = await supabase
-    .from('transactions')
-    .update({ status: newStatus })
-    .eq('id', txId)
-    .select()
-    .single();
-
-  if (error || !tx) {
-    return ctx.answerCbQuery('❌ ስህተት ተፈጥሯል!');
-  }
-
-  if (action === 'approve') {
-    // እዚህ ጋር የ Shop ባላንስ (Sync) የምትጨምርበትን ኮድ ታስገባለህ
-    
-    await ctx.editMessageCaption(
-      `✅ **ጸድቋል (APPROVED)**\nShop: ${tx.shop_id} (${tx.shop_username})\nመጠን: ${tx.sync_amount} ETB`
-    );
-    // ለተጠቃሚው ማሳወቅ
-    await ctx.telegram.sendMessage(
-      tx.user_id, 
-      `🎉 እንኳን ደስ አለዎት! ክፍያዎ ጸድቆ **${tx.sync_amount} ETB** ወደ ቤትዎ (${tx.shop_id}) Sync ተደርጓል።`
-    );
-  } else {
-    await ctx.editMessageCaption(`❌ **ውድቅ ተደርጓል (REJECTED)**\nShop: ${tx.shop_id}`);
-    await ctx.telegram.sendMessage(
-      tx.user_id, 
-      `❌ ይቅርታ፣ የላኩት የክፍያ ደረሰኝ ተቀባይነት አላገኘም። እባክዎ አድሚኑን ያናግሩ።`
-    );
-  }
-
-  await ctx.answerCbQuery();
-});
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
