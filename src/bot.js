@@ -5,6 +5,11 @@ const { parsePaymentSms, pushToControlDashboard } = require('./payments');
 
 const bot = new Telegraf(config.botToken);
 
+// Global error handler so a single failed update never crashes the bot
+bot.catch((err, ctx) => {
+  console.error(`❌ [Bot Error] Update ${ctx.updateType} failed:`, err);
+});
+
 // In-memory conversational session state per Telegram user
 const userSessions = new Map();
 
@@ -56,7 +61,12 @@ bot.start(async (ctx) => {
     console.error('Error initializing online wallet:', err.message);
   }
 
-  const link = await db.getTelegramLink(ctx.from.id);
+  let link = null;
+  try {
+    link = await db.getTelegramLink(ctx.from.id);
+  } catch (err) {
+    console.error('Error fetching telegram link:', err.message);
+  }
 
   let statusLine =
     `🔗 *የኦፍላይን ቤት ሁኔታ፦* ገና አልተገናኘም።\n` +
@@ -669,7 +679,7 @@ bot.action('FAQ_LINK', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.reply(
     `🔗 *Shop ID እና Username እንዴት ላገናኝ?*\n\n` +
-      `• `/start` በመንካት *"📱 ስልክ ቁጥሬን በማጋራት አገናኝ"* የሚለውን ይጫኑ፤ ወይም በቀጥታ \`SHOP-XXXXXXX\` ወይም \`Username\` በመጻፍ ይላኩ።\n` +
+      `• \`/start\` በመንካት *"📱 ስልክ ቁጥሬን በማጋራት አገናኝ"* የሚለውን ይጫኑ፤ ወይም በቀጥታ \`SHOP-XXXXXXX\` ወይም \`Username\` በመጻፍ ይላኩ።\n` +
       `• አዲስ ከሆኑ *📝 አዲስ ቤት መመዝገብ* የሚለውን ተጭነው ይመዝገቡ።`,
     { parse_mode: 'Markdown' }
   );
@@ -963,4 +973,3 @@ async function finalizeDepositProof(ctx, session, proof) {
 }
 
 module.exports = { bot, notifyAdmins };
-
