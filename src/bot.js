@@ -414,7 +414,7 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
       .eq('id', txUuid)
       .single();
 
-    if (!tx || tx.status !== 'PENDING') {
+    if (!tx || (tx.status !== 'PENDING' && tx.status !== 'AWAITING_ADMIN')) {
       return ctx.reply(`⚠️ ይህ ግብይት ቀድሞውኑ ተስተናግዷል (${tx?.status || 'NOT FOUND'})።`);
     }
 
@@ -424,7 +424,6 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
         return ctx.reply(`❌ ማጽደቅ አልተቻለም፦ ${rpcResult.error}`);
       }
 
-      // shop_username ባዶ ከሆነ ከ shops ሠንጠረዥ በቀጥታ ማምጣት (Client Username null እንዳይሆን!)
       let finalUsername = rpcResult.username || rpcResult.client_username || tx.shop_username;
       const finalShopId = rpcResult.shop_id || tx.shop_id;
       if (!finalUsername && finalShopId) {
@@ -451,7 +450,7 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
 
       await db.updateTransactionSyncStatus(
         txUuid,
-        syncResult.success ? 'SYNCED' : 'FAILED'
+        syncResult.success ? 'PENDING' : 'FAILED'
       );
 
       const statusBadge = syncResult.success
@@ -643,7 +642,7 @@ bot.hears('📜 የግብይት ታሪክ', async (ctx) => {
   }
 
   const lines = txs.map((t, idx) => {
-    const icon = t.status === 'APPROVED' ? '✅' : t.status === 'REJECTED' ? '❌' : '⏳';
+    const icon = t.status === 'APPROVED' || t.status === 'CLAIMED' ? '✅' : t.status === 'REJECTED' ? '❌' : '⏳';
     const modeLabel =
       t.mode === 'OFFLINE_SHOP'
         ? `🏪 Offline (${t.shop_id})`
