@@ -2,8 +2,8 @@ const express = require('express');
 const cron = require('node-cron');
 const axios = require('axios');
 const config = require('./config');
+const { bot } = require('./bot'); // bot.js ውስጥ የተፈጠረውን bot ከዚህ እንጠራዋለን
 const webhookRoutes = require('./webhook');
-module.exports = { bot };
 
 const app = express();
 app.use(express.json());
@@ -62,4 +62,3 @@ function shutdown(signal) {
 
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
-
