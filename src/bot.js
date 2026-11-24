@@ -424,12 +424,27 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
         return ctx.reply(`❌ ማጽደቅ አልተቻለም፦ ${rpcResult.error}`);
       }
 
+      // shop_username ባዶ ከሆነ ከ shops ሠንጠረዥ በቀጥታ ማምጣት (Client Username null እንዳይሆን!)
+      let finalUsername = rpcResult.username || rpcResult.client_username || tx.shop_username;
+      const finalShopId = rpcResult.shop_id || tx.shop_id;
+      if (!finalUsername && finalShopId) {
+        const { data: shopRow } = await db.supabase
+          .from('shops')
+          .select('username')
+          .ilike('shop_id', finalShopId)
+          .single();
+        finalUsername = shopRow?.username || '';
+      }
+
+      const finalAmount = rpcResult.amount || tx.amount;
+      const finalRefId = rpcResult.ref_id || tx.transaction_id;
+
       const syncResult = await pushToControlDashboard(
         {
-          shop_id: rpcResult.shop_id,
-          username: rpcResult.username,
-          amount: rpcResult.amount,
-          ref_id: rpcResult.ref_id
+          shop_id: finalShopId,
+          username: finalUsername,
+          amount: finalAmount,
+          ref_id: finalRefId
         },
         notifyAdmins
       );
@@ -456,10 +471,10 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
       }
 
       const userSuccessMsg =
-        `✅ ክፍያዎ ተረጋግጧል! *${rpcResult.amount} ብር* ወደ *${rpcResult.username}* (Shop ID: \`${rpcResult.shop_id}\`) ተልኳል።\n\n` +
+        `✅ ክፍያዎ ተረጋግጧል! *${finalAmount} ብር* ወደ *${finalUsername}* (Shop ID: \`${finalShopId}\`) ተልኳል።\n\n` +
         `⚠️ *ማሳሰቢያ፦* ባላንሱን ወደ አፕሊኬሽንዎ ለማስገባት መጀመሪያ ኮምፒውተርዎን/መሳሪያዎን ከዋይፋይ (ኢንተርኔት) ጋር ያገናኙ (Online ያድርጉ)፤ ከዚያም ATD Bingo አፕ ውስጥ ገብተው *"Sync Balance"* የሚለውን ይንኩ!`;
 
-      await bot.telegram.sendMessage(rpcResult.telegram_id, userSuccessMsg, {
+      await bot.telegram.sendMessage(rpcResult.telegram_id || tx.telegram_id, userSuccessMsg, {
         parse_mode: 'Markdown'
       });
     } else {
