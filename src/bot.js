@@ -5,12 +5,10 @@ const { parsePaymentSms, pushToControlDashboard } = require('./payments');
 
 const bot = new Telegraf(config.botToken);
 
-// Global error handler so a single failed update never crashes the bot
 bot.catch((err, ctx) => {
   console.error(`❌ [Bot Error] Update ${ctx.updateType} failed:`, err);
 });
 
-// In-memory conversational session state per Telegram user
 const userSessions = new Map();
 
 function getSession(userId) {
@@ -34,6 +32,28 @@ async function notifyAdmins(text, extra = {}) {
       await bot.telegram.sendMessage(adminId, text, { parse_mode: 'Markdown', ...extra });
     } catch (err) {
       console.error(`Failed to notify admin ${adminId}:`, err.message);
+    }
+  }
+}
+
+// Helper: Save or update telegram_links safely without crashing on duplicate key
+async function safeLinkTelegram(params) {
+  try {
+    await db.saveTelegramLink(params);
+  } catch (err) {
+    console.warn('⚠️ saveTelegramLink fallback update:', err.message);
+    try {
+      await db.supabase
+        .from('telegram_links')
+        .update({
+          telegram_username: params.telegramUsername || null,
+          phone: params.phone || null,
+          shop_id: params.shopId,
+          shop_username: params.shopUsername
+        })
+        .eq('telegram_id', params.telegramId);
+    } catch (updateErr) {
+      console.error('❌ Failed to update telegram_links:', updateErr.message);
     }
   }
 }
@@ -104,7 +124,6 @@ bot.hears('🏠 ወደ ዋና ማውጫ ተመለስ', async (ctx) => {
   await ctx.reply('🏠 ወደ ዋናው ማውጫ ተመልሰዋል።', MAIN_MENU_KEYBOARD);
 });
 
-// Handle shared contact for auto-linking existing shop
 bot.on('contact', async (ctx) => {
   const phone = ctx.message.contact.phone_number;
   const shop = await db.findShopByQuery(phone);
@@ -117,7 +136,7 @@ bot.on('contact', async (ctx) => {
     );
   }
 
-  await db.saveTelegramLink({
+  await safeLinkTelegram({
     telegramId: ctx.from.id,
     telegramUsername: ctx.from.username,
     phone,
@@ -144,7 +163,6 @@ bot.hears('🎮 ኦንላይን ጨዋታዎች (Bingo / Keno / Aviator)', async
 
   const buttons = [];
 
-  // 1. Online Bingo
   if (config.onlineGames.bingoUrl && config.onlineGames.bingoUrl.startsWith('http')) {
     buttons.push([
       Markup.button.webApp('🎱 ኦንላይን ቢንጎ (Online Bingo)', `${config.onlineGames.bingoUrl}?tg_id=${userId}`)
@@ -153,7 +171,6 @@ bot.hears('🎮 ኦንላይን ጨዋታዎች (Bingo / Keno / Aviator)', async
     buttons.push([Markup.button.callback('🎱 ኦንላይን ቢንጎ (Online Bingo)', 'GAME_SOON_BINGO')]);
   }
 
-  // 2. Online Keno
   if (config.onlineGames.kenoUrl && config.onlineGames.kenoUrl.startsWith('http')) {
     buttons.push([
       Markup.button.webApp('🔢 ኬኖ (Online Keno)', `${config.onlineGames.kenoUrl}?tg_id=${userId}`)
@@ -162,7 +179,6 @@ bot.hears('🎮 ኦንላይን ጨዋታዎች (Bingo / Keno / Aviator)', async
     buttons.push([Markup.button.callback('🔢 ኬኖ (Online Keno)', 'GAME_SOON_KENO')]);
   }
 
-  // 3. Aviator
   if (config.onlineGames.aviatorUrl && config.onlineGames.aviatorUrl.startsWith('http')) {
     buttons.push([
       Markup.button.webApp('✈️ አቪዬተር (Aviator)', `${config.onlineGames.aviatorUrl}?tg_id=${userId}`)
@@ -171,7 +187,6 @@ bot.hears('🎮 ኦንላይን ጨዋታዎች (Bingo / Keno / Aviator)', async
     buttons.push([Markup.button.callback('✈️ አቪዬተር (Aviator)', 'GAME_SOON_AVIATOR')]);
   }
 
-  // Quick Online Wallet Top-up
   buttons.push([Markup.button.callback('💰 ለኦንላይን ባላንስ ሙላ', 'DEPOSIT_MODE_ONLINE')]);
 
   const msg =
@@ -216,7 +231,6 @@ bot.hears('💰 ባላንስ መሙላት', async (ctx) => {
   );
 });
 
-// --- MODE A STEP 1: SELECT / CONFIRM SHOP_ID & USERNAME ---
 bot.action('DEPOSIT_MODE_OFFLINE', async (ctx) => {
   await ctx.answerCbQuery();
   const userId = ctx.from.id;
@@ -287,7 +301,6 @@ bot.action('OFFLINE_ENTER_NEW_SHOP', async (ctx) => {
   );
 });
 
-// --- MODE B STEP 1: ONLINE GAME WALLET DEPOSIT ---
 bot.action('DEPOSIT_MODE_ONLINE', async (ctx) => {
   await ctx.answerCbQuery();
   const session = getSession(ctx.from.id);
@@ -301,7 +314,6 @@ bot.action('DEPOSIT_MODE_ONLINE', async (ctx) => {
   );
 });
 
-// Helper to display Step 3 Payment Accounts
 async function sendPaymentInstructions(ctx, sessionData) {
   const targetInfo =
     sessionData.mode === 'OFFLINE_SHOP'
@@ -341,7 +353,6 @@ bot.hears('📝 አዲስ ቤት መመዝገብ', async (ctx) => {
   );
 });
 
-// Admin inline approval for New Center Registration
 bot.action(/^APPROVE_SHOP:(.+):(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) {
     return ctx.answerCbQuery('⛔ ፈቃድ የለዎትም!', { show_alert: true });
@@ -352,7 +363,7 @@ bot.action(/^APPROVE_SHOP:(.+):(\d+)$/, async (ctx) => {
 
   try {
     const shop = await db.activateShop(shopId);
-    await db.saveTelegramLink({
+    await safeLinkTelegram({
       telegramId: applicantTgId,
       phone: shop.phone,
       shopId: shop.shop_id,
@@ -390,7 +401,6 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('⏳ በማጽደቅ ላይ...');
 
   try {
-    // Check transaction mode first
     const { data: tx } = await db.supabase
       .from('transactions')
       .select('*')
@@ -402,13 +412,11 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
     }
 
     if (tx.mode === 'OFFLINE_SHOP') {
-      // 1. Execute Atomic Supabase RPC
       const rpcResult = await db.approveOfflineDeposit(txUuid, ctx.from.id);
       if (!rpcResult.success) {
         return ctx.reply(`❌ ማጽደቅ አልተቻለም፦ ${rpcResult.error}`);
       }
 
-      // 2. Push to ATD Control Dashboard (bingo-sync-api.onrender.com) with 3 retries
       const syncResult = await pushToControlDashboard(
         {
           shop_id: rpcResult.shop_id,
@@ -440,7 +448,6 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
         );
       }
 
-      // 3. Notify User with Critical Wi-Fi Sync Instruction
       const userSuccessMsg =
         `✅ ክፍያዎ ተረጋግጧል! *${rpcResult.amount} ብር* ወደ *${rpcResult.username}* (Shop ID: \`${rpcResult.shop_id}\`) ተልኳል።\n\n` +
         `⚠️ *ማሳሰቢያ፦* ባላንሱን ወደ አፕሊኬሽንዎ ለማስገባት መጀመሪያ ኮምፒውተርዎን/መሳሪያዎን ከዋይፋይ (ኢንተርኔት) ጋር ያገናኙ (Online ያድርጉ)፤ ከዚያም ATD Bingo አፕ ውስጥ ገብተው *"Sync Balance"* የሚለውን ይንኩ!`;
@@ -449,7 +456,6 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
         parse_mode: 'Markdown'
       });
     } else {
-      // MODE B: ONLINE GAME WALLET APPROVAL
       const rpcResult = await db.approveOnlineDeposit(txUuid, ctx.from.id);
       if (!rpcResult.success) {
         return ctx.reply(`❌ ማጽደቅ አልተቻለም፦ ${rpcResult.error}`);
@@ -747,7 +753,8 @@ bot.on('text', async (ctx) => {
       );
     }
 
-    await db.saveTelegramLink({
+    // Safely save or update link so duplicate key never blocks Step 2/4
+    await safeLinkTelegram({
       telegramId: userId,
       telegramUsername: ctx.from.username,
       phone: shop.phone,
@@ -873,7 +880,7 @@ bot.on('text', async (ctx) => {
   // --- QUICK SHOP LINKING IF USER TYPES SHOP-XXXXXXX OR PHONE OR USERNAME ---
   const quickShop = await db.findShopByQuery(text);
   if (quickShop) {
-    await db.saveTelegramLink({
+    await safeLinkTelegram({
       telegramId: userId,
       telegramUsername: ctx.from.username,
       phone: quickShop.phone,
@@ -889,7 +896,6 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Helper to check duplicates, save pending transaction, and forward to Admin
 async function finalizeDepositProof(ctx, session, proof) {
   const userId = ctx.from.id;
 
