@@ -67,16 +67,21 @@ function parsePaymentSms(text) {
 }
 
 /**
- * Pushes approved Offline Shop deposit to ATD Control Dashboard (bingo-sync-api.onrender.com)
+ * Pushes approved Offline Shop deposit to ATD Control Dashboard (sync-api.onrender.com)
  * Includes 3 automatic retries with exponential backoff and instant Admin alert on failure.
  */
 async function pushToControlDashboard({ shop_id, username, amount, ref_id }, notifyAdminsFn) {
+  const cleanShopId = String(shop_id || '').trim().toUpperCase();
+  const cleanUsername = String(username || '').trim();
+  const cleanRefId = String(ref_id || '').trim().toUpperCase();
+
   const payload = {
-    shop_id: String(shop_id).toUpperCase(),
-    username: String(username).trim(),
+    shop_id: cleanShopId,
+    username: cleanUsername,
+    client_username: cleanUsername, // ፖርታሉ (sync-api.onrender.com) Client Username ባዶ እንዳያደርግ
     amount: Number(amount),
-    ref_id: String(ref_id).toUpperCase(),
-    status: 'READY_TO_SYNC'
+    ref_id: cleanRefId,
+    transaction_id: cleanRefId
   };
 
   const maxAttempts = 3;
@@ -115,7 +120,7 @@ async function pushToControlDashboard({ shop_id, username, amount, ref_id }, not
       `💰 *Amount:* ${payload.amount} ETB\n` +
       `🧾 *Ref ID:* \`${payload.ref_id}\`\n` +
       `❌ *Error:* ${lastError}\n\n` +
-      `⚠️ Supabase ባላንስ ተጨምሯል ነገር ግን ወደ \`bingo-sync-api.onrender.com\` አልተላከም። እባክዎ በእጅ (Manual) ያስተካክሉ!`;
+      `⚠️ Supabase ባላንስ ተጨምሯል ነገር ግን ወደ \`sync-api.onrender.com\` አልተላከም። እባክዎ በእጅ (Manual) ያስተካክሉ!`;
 
     await notifyAdminsFn(alertMsg);
   }
