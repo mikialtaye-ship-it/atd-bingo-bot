@@ -26,6 +26,13 @@ function isAdmin(userId) {
   return config.adminIds.includes(Number(userId));
 }
 
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 async function notifyAdmins(text, extra = {}) {
   for (const adminId of config.adminIds) {
     try {
@@ -438,13 +445,13 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
 
       if (ctx.callbackQuery.message.photo) {
         await ctx.editMessageCaption(
-          `${ctx.callbackQuery.message.caption}\n\n${statusBadge}`,
-          { parse_mode: 'Markdown' }
+          `${escapeHtml(ctx.callbackQuery.message.caption)}\n\n${statusBadge}`,
+          { parse_mode: 'HTML' }
         );
       } else {
         await ctx.editMessageText(
-          `${ctx.callbackQuery.message.text}\n\n${statusBadge}`,
-          { parse_mode: 'Markdown' }
+          `${escapeHtml(ctx.callbackQuery.message.text)}\n\n${statusBadge}`,
+          { parse_mode: 'HTML' }
         );
       }
 
@@ -464,13 +471,13 @@ bot.action(/^APPROVE_DEP:(.+)$/, async (ctx) => {
       const statusBadge = '✅ ጸድቋል! የኦንላይን ዋሌት ባላንስ ተጨምሯል።';
       if (ctx.callbackQuery.message.photo) {
         await ctx.editMessageCaption(
-          `${ctx.callbackQuery.message.caption}\n\n${statusBadge}`,
-          { parse_mode: 'Markdown' }
+          `${escapeHtml(ctx.callbackQuery.message.caption)}\n\n${statusBadge}`,
+          { parse_mode: 'HTML' }
         );
       } else {
         await ctx.editMessageText(
-          `${ctx.callbackQuery.message.text}\n\n${statusBadge}`,
-          { parse_mode: 'Markdown' }
+          `${escapeHtml(ctx.callbackQuery.message.text)}\n\n${statusBadge}`,
+          { parse_mode: 'HTML' }
         );
       }
 
@@ -503,13 +510,13 @@ bot.action(/^REJECT_DEP:(.+)$/, async (ctx) => {
 
   if (ctx.callbackQuery.message.photo) {
     await ctx.editMessageCaption(
-      `${ctx.callbackQuery.message.caption}\n\n❌ *ውድቅ ተደርጓል (REJECTED)*`,
-      { parse_mode: 'Markdown' }
+      `${escapeHtml(ctx.callbackQuery.message.caption)}\n\n❌ <b>ውድቅ ተደርጓል (REJECTED)</b>`,
+      { parse_mode: 'HTML' }
     );
   } else {
     await ctx.editMessageText(
-      `${ctx.callbackQuery.message.text}\n\n❌ *ውድቅ ተደርጓል (REJECTED)*`,
-      { parse_mode: 'Markdown' }
+      `${escapeHtml(ctx.callbackQuery.message.text)}\n\n❌ <b>ውድቅ ተደርጓል (REJECTED)</b>`,
+      { parse_mode: 'HTML' }
     );
   }
 
@@ -753,7 +760,6 @@ bot.on('text', async (ctx) => {
       );
     }
 
-    // Safely save or update link so duplicate key never blocks Step 2/4
     await safeLinkTelegram({
       telegramId: userId,
       telegramUsername: ctx.from.username,
@@ -934,18 +940,18 @@ async function finalizeDepositProof(ctx, session, proof) {
 
     const typeHeader =
       tx.mode === 'OFFLINE_SHOP'
-        ? `🏪 *Type:* OFFLINE_SHOP\n🆔 *Shop ID:* \`${tx.shop_id}\`\n👤 *Username:* \`${tx.shop_username}\`\n`
-        : `🎮 *Type:* ONLINE_GAME\n`;
+        ? `🏪 <b>Type:</b> OFFLINE SHOP\n🆔 <b>Shop ID:</b> <code>${escapeHtml(tx.shop_id)}</code>\n👤 <b>Username:</b> <code>${escapeHtml(tx.shop_username)}</code>\n`
+        : `🎮 <b>Type:</b> ONLINE GAME\n`;
 
     const adminCaption =
-      `💰 *አዲስ የክፍያ ማረጋገጫ (Deposit Request)*\n` +
+      `💰 <b>አዲስ የክፍያ ማረጋገጫ (Deposit Request)</b>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `${typeHeader}` +
-      `💵 *Requested Amount:* *${tx.amount} ETB*\n` +
-      `📊 *Parsed Amount:* ${tx.parsed_amount || tx.amount} ETB\n` +
-      `🧾 *Transaction ID:* \`${tx.transaction_id}\`\n` +
-      `🏦 *Method:* ${tx.payment_method}\n` +
-      `🙋 *User TG:* \`${userId}\` (@${ctx.from.username || 'N/A'})`;
+      `💵 <b>Requested Amount:</b> <b>${tx.amount} ETB</b>\n` +
+      `📊 <b>Parsed Amount:</b> ${tx.parsed_amount || tx.amount} ETB\n` +
+      `🧾 <b>Transaction ID:</b> <code>${escapeHtml(tx.transaction_id)}</code>\n` +
+      `🏦 <b>Method:</b> ${escapeHtml(tx.payment_method)}\n` +
+      `🙋 <b>User TG:</b> <code>${userId}</code> (@${escapeHtml(ctx.from.username || 'N/A')})`;
 
     const approveLabel =
       tx.mode === 'OFFLINE_SHOP'
@@ -961,14 +967,14 @@ async function finalizeDepositProof(ctx, session, proof) {
       if (proof.proofFileId) {
         await bot.telegram.sendPhoto(adminId, proof.proofFileId, {
           caption: adminCaption,
-          parse_mode: 'Markdown',
+          parse_mode: 'HTML',
           ...inlineKb
         });
       } else {
         await bot.telegram.sendMessage(
           adminId,
-          `${adminCaption}\n\n📩 *SMS Proof:*\n\`${proof.proofText}\``,
-          { parse_mode: 'Markdown', ...inlineKb }
+          `${adminCaption}\n\n📩 <b>SMS Proof:</b>\n<code>${escapeHtml(proof.proofText)}</code>`,
+          { parse_mode: 'HTML', ...inlineKb }
         );
       }
     }
